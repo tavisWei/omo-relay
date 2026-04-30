@@ -97,8 +97,8 @@ OMO Relay 是一个为 [OpenCode](https://opencode.ai) + [OMO](https://omo.sh) �
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/tavisWei/-opencode-omo-ULW-Ralph-.git
-cd -opencode-omo-ULW-Ralph-
+git clone https://github.com/tavisWei/omo-relay.git
+cd omo-relay
 ```
 
 ### 2. 安装 Python 依赖

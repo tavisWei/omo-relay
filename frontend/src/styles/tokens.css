@@ -1,0 +1,61 @@
+:root {
+  /* Sidebar (dark) */
+  --sidebar-bg: #0f172a;
+  --sidebar-bg-hover: #1e293b;
+  --sidebar-text: #94a3b8;
+  --sidebar-text-active: #f8fafc;
+  --sidebar-accent: #f97316;
+  --sidebar-border: #1e293b;
+  --sidebar-width: 220px;
+
+  /* Content canvas (bright) */
+  --canvas-bg: #f8fafc;
+  --canvas-text: #0f172a;
+  --canvas-text-secondary: #475569;
+  --canvas-text-muted: #94a3b8;
+  --canvas-border: #e2e8f0;
+  --canvas-card: #ffffff;
+  --canvas-card-border: #e2e8f0;
+
+  /* Status accents */
+  --accent-orange: #f97316;
+  --accent-orange-soft: #fff7ed;
+  --accent-green: #10b981;
+  --accent-green-soft: #ecfdf5;
+  --accent-red: #ef4444;
+  --accent-red-soft: #fef2f2;
+  --accent-blue: #3b82f6;
+  --accent-blue-soft: #eff6ff;
+  --accent-yellow: #f59e0b;
+  --accent-yellow-soft: #fffbeb;
+  --accent-slate: #64748b;
+  --accent-slate-soft: #f1f5f9;
+  --accent-purple: #8b5cf6;
+  --accent-purple-soft: #f5f3ff;
+
+  /* Spacing scale (8px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 6px rgba(15, 23, 42, 0.05);
+  --shadow-lg: 0 10px 20px rgba(15, 23, 42, 0.06);
+  --shadow-xl: 0 20px 40px rgba(15, 23, 42, 0.08);
+}

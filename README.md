@@ -419,11 +419,4 @@ npm run preview  # 预览构建
 
 欢迎提交 Issue 和 Pull Request！
 
----
 
-## 致谢
-
-- [OpenCode](https://opencode.ai) - AI 编程助手
-- [OMO](https://omo.sh) - 智能开发工具
-- [Vue.js](https://vuejs.org) - 前端框架
-- [Vite](https://vitejs.dev) - 构建工具

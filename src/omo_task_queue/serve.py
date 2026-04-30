@@ -73,7 +73,10 @@ def main() -> None:
         observer,
         SessionSelectionStore(base_dir / ".omo_selected_session.json"),
     )
-    project_registry = ProjectRegistry(Path.home() / ".omo_project_registry.json")
+    project_registry = ProjectRegistry(
+        Path.home() / ".omo_project_registry.json",
+        opencode_db_path=opencode_db_path,
+    )
     project_registry.upsert(
         project_path=base_dir,
         api_base_url=_api_base_url(args.host, args.port),

@@ -43,8 +43,17 @@
                 :value="p.project_path"
               >
                 {{ p.project_name || p.project_path }}
+                <span v-if="!p.api_base_url"> (点击启动)</span>
               </option>
             </select>
+            <button
+              v-if="selectedProject && !selectedProject.api_base_url"
+              class="btn btn-sm btn-primary"
+              @click="$emit('startProject', selectedProjectPath)"
+              :disabled="starting"
+            >
+              {{ starting ? '启动中...' : '启动服务' }}
+            </button>
           </div>
           <div v-if="sessions.length > 0" class="selector-group">
             <label class="selector-label">会话</label>
@@ -76,10 +85,15 @@ const props = defineProps({
   projects: { type: Array, default: () => [] },
   selectedProjectPath: { type: String, default: '' },
   sessions: { type: Array, default: () => [] },
-  modelValue: { type: String, default: '' }
+  modelValue: { type: String, default: '' },
+  starting: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['add', 'update:selectedProjectPath', 'update:modelValue'])
+const emit = defineEmits(['add', 'update:selectedProjectPath', 'update:modelValue', 'startProject'])
+
+const selectedProject = computed(() => {
+  return props.projects.find(p => p.project_path === props.selectedProjectPath)
+})
 
 const form = reactive({
   prompt: '',

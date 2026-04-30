@@ -56,6 +56,8 @@
           v-model:selectedProjectPath="selectedProjectPath"
           :sessions="projectSessions"
           v-model="selectedSessionId"
+          @startProject="handleStartProject"
+          :starting="startingProject"
         />
 
         <template v-if="queueView === 'active'">
@@ -127,6 +129,7 @@ const selectedProjectPath = ref('')
 const projectSessions = ref([])
 const selectedSessionId = ref('')
 const error = ref('')
+const startingProject = ref(false)
 let applyingSessionSelection = false
 
 function normalizeQueueData(data) {
@@ -184,9 +187,18 @@ async function loadProjects() {
   try {
     const res = await api.listProjects()
     if (res.success) {
-      projects.value = res.data || []
-      if (projects.value.length > 0 && !selectedProjectPath.value) {
-        selectedProjectPath.value = projects.value[0].project_path
+      const allProjects = res.data || []
+      // Separate projects with running API servers from discovered-only projects
+      const running = allProjects.filter(p => p.api_base_url)
+      const discovered = allProjects.filter(p => !p.api_base_url)
+      projects.value = [...running, ...discovered]
+      
+      // Auto-select first running project, or first project if none running
+      if (!selectedProjectPath.value && projects.value.length > 0) {
+        const firstRunning = projects.value.find(p => p.api_base_url)
+        selectedProjectPath.value = firstRunning 
+          ? firstRunning.project_path 
+          : projects.value[0].project_path
       }
     }
   } catch (e) {
@@ -338,6 +350,8 @@ watch(selectedProjectPath, (value, previous) => {
     activePage.value = 1
     completedPage.value = 1
     refresh()
+  } else if (project) {
+    error.value = `项目 "${project.project_name}" 尚未启动服务，无法管理任务`
   }
 })
 
@@ -345,6 +359,33 @@ watch(selectedSessionId, (value, previous) => {
   if (!value || value === previous || applyingSessionSelection) return
   handleSessionChange(value)
 })
+
+async function handleStartProject(projectPath) {
+  const project = projects.value.find(p => p.project_path === projectPath)
+  if (!project || project.api_base_url) return
+
+  startingProject.value = true
+  error.value = ''
+  try {
+    const res = await api.startProject(projectPath)
+    if (res.success) {
+      await loadProjects()
+      selectedProjectPath.value = projectPath
+      setActiveBaseUrl(res.api_base_url)
+      selectedSessionId.value = ''
+      projectSessions.value = []
+      activePage.value = 1
+      completedPage.value = 1
+      await refresh()
+    } else {
+      error.value = res.error || '启动服务失败'
+    }
+  } catch (e) {
+    error.value = '启动服务失败: ' + e.message
+  } finally {
+    startingProject.value = false
+  }
+}
 
 watch(queueView, () => {
   activePage.value = 1
@@ -359,8 +400,6 @@ onMounted(() => {
     }
     refresh()
   })
-  const interval = setInterval(refresh, 3000)
-  return () => clearInterval(interval)
 })
 </script>
 

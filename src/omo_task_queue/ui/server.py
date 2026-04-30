@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
+import sys
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -21,6 +24,8 @@ from omo_task_queue.ui.panel import (
     TestNotificationRequest,
     UIAction,
 )
+
+logger = logging.getLogger("omo_task_queue.server")
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
@@ -83,6 +88,81 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
 
     def _send_404(self) -> None:
         self._send_json({"error": "Not found"}, 404)
+
+    def _start_project_server(self, project_path: str) -> dict[str, Any]:
+        if not project_path:
+            return {"success": False, "error": "Project path is required"}
+
+        project_dir = Path(project_path)
+        if not project_dir.exists():
+            return {
+                "success": False,
+                "error": f"Project directory does not exist: {project_path}",
+            }
+
+        if self.project_registry:
+            projects = self.project_registry.list_projects()
+            for p in projects:
+                if p.project_path == project_path and p.api_base_url:
+                    return {
+                        "success": True,
+                        "api_base_url": p.api_base_url,
+                        "message": "Server already running",
+                    }
+
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "omo_task_queue.serve",
+            "--directory",
+            str(project_path),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ]
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(project_path),
+            )
+
+            import time
+
+            time.sleep(2)
+
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                return {
+                    "success": False,
+                    "error": f"Server failed to start. stdout: {stdout.decode()}, stderr: {stderr.decode()}",
+                }
+
+            api_base_url = f"http://127.0.0.1:{port}"
+            if self.project_registry:
+                self.project_registry.upsert(
+                    project_path=project_path,
+                    api_base_url=api_base_url,
+                )
+
+            return {
+                "success": True,
+                "api_base_url": api_base_url,
+                "message": "Server started successfully",
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"Failed to start server: {str(e)}"}
 
     def _default_status(self) -> dict[str, Any]:
         counts = {
@@ -175,12 +255,28 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/projects":
-            projects = (
-                [asdict(project) for project in self.project_registry.list_projects()]
-                if self.project_registry
-                else []
-            )
+            if self.project_registry:
+                newly_registered = self.project_registry.auto_register_discovered()
+                if newly_registered:
+                    logger.info(
+                        "Auto-registered %d new projects: %s",
+                        len(newly_registered),
+                        [p.project_name for p in newly_registered],
+                    )
+                projects = [
+                    asdict(project) for project in self.project_registry.list_projects()
+                ]
+            else:
+                projects = []
             self._send_json({"success": True, "data": projects})
+            return
+
+        if path == "/api/projects/start":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            payload = _parse_json(body)
+            project_path = payload.get("project_path", "")
+            result = self._start_project_server(project_path)
+            self._send_json(result)
             return
 
         if path == "/api/sessions":
@@ -222,6 +318,12 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
         payload = _parse_json(body)
+
+        if path == "/api/projects/start":
+            project_path = payload.get("project_path", "")
+            result = self._start_project_server(project_path)
+            self._send_json(result)
+            return
 
         if path in {"/api/tasks", "/api/queue"}:
             req = AddTaskRequest(

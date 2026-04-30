@@ -99,5 +99,13 @@ export const api = {
   /** Save notification config */
   saveNotifyConfig(config) {
     return request('POST', '/api/notify/config', config)
+  },
+
+  startProject(projectPath) {
+    const saved = activeBaseUrl
+    activeBaseUrl = DEFAULT_BASE_URL
+    return request('POST', '/api/projects/start', { project_path: projectPath }).finally(() => {
+      activeBaseUrl = saved
+    })
   }
 }

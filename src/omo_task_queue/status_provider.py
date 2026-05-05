@@ -5,10 +5,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from omo_task_queue.confirmed_session import (
+    ConfirmedSessionStore,
+    resolve_confirmed_session_id,
+)
 from omo_task_queue.opencode_observer import OpenCodeObserver, SessionSnapshot
 from omo_task_queue.session_selection import ProjectSessionService
 from omo_task_queue.session_continuer import ContinuationStateStore
 from omo_task_queue.store import Config, SQLiteStore
+from omo_task_queue.tmux_target import TmuxTargetStore
 from omo_task_queue.watcher_status import WatcherStatusSnapshot, WatcherStatusStore
 
 
@@ -69,8 +74,15 @@ class QueueStatusProvider:
             if self._session_service is not None
             else None
         )
+        confirmed_session_id = resolve_confirmed_session_id(
+            self._project_path, selected_session_id
+        )
         if self._observer is not None:
-            session_id = selected_session_id or self._observer.locate_primary_session()
+            session_id = (
+                confirmed_session_id
+                or selected_session_id
+                or self._observer.locate_primary_session()
+            )
             if session_id is not None:
                 snapshot = self._observer.snapshot(session_id)
 
@@ -78,18 +90,25 @@ class QueueStatusProvider:
         continuation_state = (
             self._continuation_state.load() if self._continuation_state else None
         )
+        live_tmux_target = self._load_tmux_target(confirmed_session_id)
 
         return {
             "project_path": self._project_path,
             "counts": counts,
             "primary_session_id": session_id,
             "selected_session_id": selected_session_id,
+            "confirmed_session_id": confirmed_session_id,
             "tmux_session_name": (
-                watcher_snapshot.tmux_session_name if watcher_snapshot else None
+                (live_tmux_target.session_name if live_tmux_target else None)
+                or (watcher_snapshot.tmux_session_name if watcher_snapshot else None)
             ),
-            "tmux_pane_id": watcher_snapshot.tmux_pane_id if watcher_snapshot else None,
+            "tmux_pane_id": (
+                (live_tmux_target.pane_id if live_tmux_target else None)
+                or (watcher_snapshot.tmux_pane_id if watcher_snapshot else None)
+            ),
             "tmux_attach_command": (
-                watcher_snapshot.tmux_attach_command if watcher_snapshot else None
+                (live_tmux_target.attach_command if live_tmux_target else None)
+                or (watcher_snapshot.tmux_attach_command if watcher_snapshot else None)
             ),
             "watcher_running": self._watcher_running(watcher_snapshot),
             "watcher_decision": watcher_snapshot.decision if watcher_snapshot else None,
@@ -178,3 +197,10 @@ class QueueStatusProvider:
         if field == "stalled":
             return observer_snapshot.stalled(self._config.stalled_threshold)
         return False
+
+    def _load_tmux_target(self, confirmed_session_id: Optional[str]):
+        if not confirmed_session_id:
+            return None
+        short_id = ConfirmedSessionStore.session_short_id(confirmed_session_id)
+        target_path = Path(self._project_path) / f".omo_tmux_target.{short_id}.json"
+        return TmuxTargetStore(target_path).load()

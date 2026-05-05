@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from omo_task_queue.confirmed_session import ConfirmedSession, ConfirmedSessionStore
 from omo_task_queue.session_continuer import ContinuationState, ContinuationStateStore
 from omo_task_queue.state import ExecutionMode, Task, TaskStatus
 from omo_task_queue.store import Config, SQLiteStore
@@ -58,6 +60,19 @@ class _Observer:
 class _NotReadyObserver(_Observer):
     def snapshot(self, session_id: str) -> _NotReadySnapshot:
         return _NotReadySnapshot()
+
+
+class _ObserverForSession(_Observer):
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+
+    def locate_primary_session(self) -> str:
+        return self._session_id
+
+    def snapshot(self, session_id: str) -> _ReadySnapshot:
+        snap = _ReadySnapshot()
+        snap.root_session_id = session_id
+        return snap
 
 
 class _FailingContinuer:
@@ -186,6 +201,50 @@ def test_watch_loop_tmux_pane_not_ready_does_not_increment_retry_budget(
     assert updated.status == TaskStatus.RETRY_WAIT
     assert updated.retry_count == 0
     assert updated.error_message == "tmux pane not ready"
+
+    store.close()
+
+
+def test_watch_loop_tmux_target_creation_failure_does_not_increment_retry_budget(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "queue.db")
+    task = Task(
+        id="t1",
+        title="Task t1",
+        prompt="hello",
+        mode=ExecutionMode.ONE_SHOT,
+        status=TaskStatus.PENDING,
+        project_path=str(tmp_path.resolve()),
+        target_session_id="ses-1",
+    )
+    store.add_task(task)
+
+    class _TargetCreateFailContinuer:
+        def continue_task(self, session_id: str, task: Task):
+            return subprocess.CompletedProcess(
+                ["tmux"], 1, stdout="", stderr="failed to create tmux target"
+            )
+
+    loop = WatchLoop(
+        store=store,
+        config=Config(),
+        observer=_Observer(),
+        continuer=_TargetCreateFailContinuer(),
+        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
+        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+        poll_interval_seconds=0,
+    )
+
+    loop.run_once()
+
+    updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
+    assert updated is not None
+    assert updated.status == TaskStatus.RETRY_WAIT
+    assert updated.retry_count == 0
+    assert updated.error_message == "failed to create tmux target"
 
     store.close()
 
@@ -335,6 +394,164 @@ def test_watch_loop_launch_success_keeps_pending_task_running(tmp_path: Path) ->
     assert state is not None
     assert state.task_id == "t1"
 
+    store.close()
+
+
+def test_watch_loop_status_uses_confirmed_session_tmux_target(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "queue.db")
+    task = Task(
+        id="t1",
+        title="Task t1",
+        prompt="hello",
+        mode=ExecutionMode.ONE_SHOT,
+        status=TaskStatus.PENDING,
+        project_path=str(tmp_path.resolve()),
+        target_session_id="ses-2",
+    )
+    store.add_task(task)
+    ConfirmedSessionStore(tmp_path).save(
+        ConfirmedSession(
+            session_id="ses-2",
+            session_short_id=ConfirmedSessionStore.session_short_id("ses-2"),
+            project_dir=str(tmp_path.resolve()),
+        )
+    )
+    (tmp_path / ".omo_tmux_target.ses-2.json").write_text(
+        json.dumps(
+            {
+                "session_name": "omo-confirmed",
+                "pane_id": "%9",
+                "attach_command": "tmux attach -t omo-confirmed",
+                "project_dir": str(tmp_path.resolve()),
+                "opencode_session_id": "ses-2",
+            }
+        ),
+        encoding="utf-8",
+    )
+    continuer = _SuccessContinuer()
+
+    loop = WatchLoop(
+        store=store,
+        config=Config(),
+        observer=_Observer(),
+        continuer=continuer,
+        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
+        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+        poll_interval_seconds=0,
+    )
+
+    loop.run_once()
+
+    snapshot = WatcherStatusStore(tmp_path / ".omo_watcher_status.json").load()
+    assert snapshot is not None
+    assert snapshot.tmux_session_name == "omo-confirmed"
+    assert snapshot.tmux_pane_id == "%9"
+    store.close()
+
+
+def test_watch_loop_resets_stale_running_state_after_session_switch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "queue.db")
+    task = Task(
+        id="t1",
+        title="Task t1",
+        prompt="hello",
+        mode=ExecutionMode.ONE_SHOT,
+        status=TaskStatus.RUNNING,
+        project_path=str(tmp_path.resolve()),
+        target_session_id="ses-1",
+    )
+    store.add_task(task)
+    ContinuationStateStore(tmp_path / ".omo_session_watch_state.json").save(
+        ContinuationState(
+            task_id="t1",
+            session_id="ses-1",
+            baseline_message_id="msg-1",
+            launched_at_ms=1,
+        )
+    )
+    ConfirmedSessionStore(tmp_path).save(
+        ConfirmedSession(
+            session_id="ses-2",
+            session_short_id=ConfirmedSessionStore.session_short_id("ses-2"),
+            project_dir=str(tmp_path.resolve()),
+        )
+    )
+
+    continuer = _SuccessContinuer()
+
+    loop = WatchLoop(
+        store=store,
+        config=Config(),
+        observer=_ObserverForSession("ses-2"),
+        continuer=continuer,
+        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
+        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+        poll_interval_seconds=0,
+    )
+
+    loop.run_once()
+
+    updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
+    assert updated is not None
+    assert updated.status == TaskStatus.RUNNING
+    assert updated.target_session_id == "ses-2"
+    assert updated.error_message == "Continuation session changed"
+    assert continuer.calls == [("ses-2", "t1")]
+    assert (
+        ContinuationStateStore(tmp_path / ".omo_session_watch_state.json").load()
+        is not None
+    )
+    store.close()
+
+
+def test_watch_loop_rebinds_retry_task_to_confirmed_session(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "queue.db")
+    task = Task(
+        id="t1",
+        title="Task t1",
+        prompt="hello",
+        mode=ExecutionMode.ONE_SHOT,
+        status=TaskStatus.RETRY_WAIT,
+        retry_count=1,
+        project_path=str(tmp_path.resolve()),
+        target_session_id="ses-1",
+    )
+    task.updated_at = datetime.utcnow() - timedelta(seconds=10)
+    store.add_task(task)
+    continuer = _SuccessContinuer()
+    ConfirmedSessionStore(tmp_path).save(
+        ConfirmedSession(
+            session_id="ses-2",
+            session_short_id=ConfirmedSessionStore.session_short_id("ses-2"),
+            project_dir=str(tmp_path.resolve()),
+        )
+    )
+
+    loop = WatchLoop(
+        store=store,
+        config=Config(retry_backoff_seconds=5),
+        observer=_ObserverForSession("ses-2"),
+        continuer=continuer,
+        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
+        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+        poll_interval_seconds=0,
+    )
+
+    loop.run_once()
+
+    updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
+    assert updated is not None
+    assert updated.status == TaskStatus.RUNNING
+    assert updated.target_session_id == "ses-2"
+    assert continuer.calls == [("ses-2", "t1")]
     store.close()
 
 
@@ -499,6 +716,55 @@ def test_watch_loop_precreates_target_for_tmux_recovery_task_at_max_retries(
     assert continuer.ensure_calls == [("ses-1", "t1")]
     assert continuer.calls == []
 
+    store.close()
+
+
+def test_watch_loop_retries_session_mismatch_task_at_max_retries(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "queue.db")
+    task = Task(
+        id="t1",
+        title="Task t1",
+        prompt="hello",
+        mode=ExecutionMode.ONE_SHOT,
+        status=TaskStatus.RETRY_WAIT,
+        retry_count=3,
+        max_retries=3,
+        project_path=str(tmp_path.resolve()),
+        target_session_id="ses-1",
+        error_message="tmux target session mismatch",
+    )
+    task.updated_at = datetime.utcnow() - timedelta(seconds=10)
+    store.add_task(task)
+    continuer = _SuccessContinuer()
+    ConfirmedSessionStore(tmp_path).save(
+        ConfirmedSession(
+            session_id="ses-2",
+            session_short_id=ConfirmedSessionStore.session_short_id("ses-2"),
+            project_dir=str(tmp_path.resolve()),
+        )
+    )
+
+    loop = WatchLoop(
+        store=store,
+        config=Config(retry_backoff_seconds=5),
+        observer=_ObserverForSession("ses-2"),
+        continuer=continuer,
+        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
+        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+        poll_interval_seconds=0,
+    )
+
+    loop.run_once()
+
+    updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
+    assert updated is not None
+    assert updated.status == TaskStatus.RUNNING
+    assert updated.target_session_id == "ses-2"
+    assert continuer.calls == [("ses-2", "t1")]
     store.close()
 
 

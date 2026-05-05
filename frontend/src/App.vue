@@ -58,11 +58,14 @@
           v-model="selectedSessionId"
           @startProject="handleStartProject"
           :starting="startingProject"
+          :confirmedSessionId="confirmedSessionId"
+          @confirmSession="handleConfirmSession"
         />
 
         <template v-if="queueView === 'active'">
           <RunningTask
             :task="runningTask"
+            :tmuxAttachCommand="runtimeStatus.tmux_attach_command || ''"
             @done="handleDone"
             @skip="handleSkip"
           />
@@ -128,9 +131,24 @@ const projects = ref([])
 const selectedProjectPath = ref('')
 const projectSessions = ref([])
 const selectedSessionId = ref('')
+const confirmedSessionId = ref('')
 const error = ref('')
 const startingProject = ref(false)
 let applyingSessionSelection = false
+
+function withCurrentAttachCommand(tasks) {
+  const currentAttach = runtimeStatus.value?.tmux_attach_command || null
+  if (!currentAttach) return tasks
+  return (tasks || []).map(task => ({
+    ...task,
+    tmux_attach_command: currentAttach
+  }))
+}
+
+function withoutRunningTask(tasks, running) {
+  if (!running?.id) return tasks || []
+  return (tasks || []).filter(task => task.id !== running.id)
+}
 
 function normalizeQueueData(data) {
   if (Array.isArray(data)) {
@@ -156,16 +174,31 @@ async function refresh() {
     ])
     if (listRes.success) {
       const queueData = normalizeQueueData(listRes.data)
-      activeQueueTasks.value = queueData.active
-      completedQueueTasks.value = queueData.completed
+      activeQueueTasks.value = withoutRunningTask(
+        withCurrentAttachCommand(queueData.active),
+        runningTask.value
+      )
+      completedQueueTasks.value = withCurrentAttachCommand(queueData.completed)
     } else {
       error.value = listRes.error || '获取队列失败'
     }
     if (runRes.success) {
       runningTask.value = runRes.data || null
+      activeQueueTasks.value = withoutRunningTask(
+        activeQueueTasks.value,
+        runningTask.value
+      )
     }
     if (statusRes.success) {
       runtimeStatus.value = statusRes.data || {}
+      if (
+        statusRes.data
+        && Object.prototype.hasOwnProperty.call(statusRes.data, 'confirmed_session_id')
+      ) {
+        confirmedSessionId.value = statusRes.data.confirmed_session_id || ''
+      }
+      activeQueueTasks.value = withCurrentAttachCommand(activeQueueTasks.value)
+      completedQueueTasks.value = withCurrentAttachCommand(completedQueueTasks.value)
     }
     if (sessionsRes.success) {
       const payload = sessionsRes.data || {}
@@ -206,27 +239,37 @@ async function loadProjects() {
   }
 }
 
-async function handleSessionChange(sessionId) {
-  if (!sessionId || sessionId === runtimeStatus.value.selected_session_id) {
-    selectedSessionId.value = sessionId
-    return
-  }
+async function handleConfirmSession(sessionId) {
+  if (!sessionId) return
   error.value = ''
-  applyingSessionSelection = true
   try {
-    const res = await api.setSession(sessionId)
+    const res = await api.confirmSession(sessionId)
     if (res.success) {
-      selectedSessionId.value = res.data?.selected_session_id || sessionId
+      confirmedSessionId.value = sessionId
       await refresh()
     } else {
-      error.value = res.error || '切换会话失败'
-      selectedSessionId.value = runtimeStatus.value.selected_session_id || ''
+      error.value = res.error || '确认会话失败'
     }
   } catch (e) {
-    error.value = '切换会话失败: ' + e.message
-    selectedSessionId.value = runtimeStatus.value.selected_session_id || ''
-  } finally {
-    applyingSessionSelection = false
+    if (
+      selectedProjectPath.value
+      && String(e.message || '').includes('HTTP 404')
+    ) {
+      try {
+        const fallback = await api.startProject(selectedProjectPath.value, sessionId)
+        if (fallback.success) {
+          confirmedSessionId.value = sessionId
+          await refresh()
+          return
+        }
+        error.value = fallback.error || '确认会话失败'
+        return
+      } catch (fallbackError) {
+        error.value = '确认会话失败: ' + fallbackError.message
+        return
+      }
+    }
+    error.value = '确认会话失败: ' + e.message
   }
 }
 
@@ -346,6 +389,7 @@ watch(selectedProjectPath, (value, previous) => {
   if (project?.api_base_url) {
     setActiveBaseUrl(project.api_base_url)
     selectedSessionId.value = ''
+    confirmedSessionId.value = ''
     projectSessions.value = []
     activePage.value = 1
     completedPage.value = 1
@@ -355,9 +399,25 @@ watch(selectedProjectPath, (value, previous) => {
   }
 })
 
-watch(selectedSessionId, (value, previous) => {
+watch(selectedSessionId, async (value, previous) => {
   if (!value || value === previous || applyingSessionSelection) return
-  handleSessionChange(value)
+  error.value = ''
+  applyingSessionSelection = true
+  try {
+    const res = await api.setSession(value)
+    if (res.success) {
+      selectedSessionId.value = res.data?.selected_session_id || value
+      await refresh()
+    } else {
+      error.value = res.error || '切换会话失败'
+      selectedSessionId.value = runtimeStatus.value.selected_session_id || ''
+    }
+  } catch (e) {
+    error.value = '切换会话失败: ' + e.message
+    selectedSessionId.value = runtimeStatus.value.selected_session_id || ''
+  } finally {
+    applyingSessionSelection = false
+  }
 })
 
 async function handleStartProject(projectPath) {
@@ -373,6 +433,7 @@ async function handleStartProject(projectPath) {
       selectedProjectPath.value = projectPath
       setActiveBaseUrl(res.api_base_url)
       selectedSessionId.value = ''
+      confirmedSessionId.value = ''
       projectSessions.value = []
       activePage.value = 1
       completedPage.value = 1
@@ -400,6 +461,7 @@ onMounted(() => {
     }
     refresh()
   })
+  setInterval(refresh, 5000)
 })
 </script>
 

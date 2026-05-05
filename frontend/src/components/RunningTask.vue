@@ -12,6 +12,12 @@
       <span class="meta-pill">ID: {{ task.id }}</span>
       <span class="meta-pill">重试 {{ task.retry_count }}/{{ task.max_retries }}</span>
     </div>
+    <div v-if="tmuxAttachCommand" class="running-tmux">
+      <code class="tmux-code">{{ tmuxAttachCommand }}</code>
+      <button class="tmux-copy" @click="copyText(tmuxAttachCommand)">
+        {{ copied ? '已复制' : '复制' }}
+      </button>
+    </div>
     <div class="running-actions">
       <button class="btn btn-primary" @click="$emit('done', task.id)">
         <span class="btn-icon">✓</span> 完成
@@ -24,10 +30,14 @@
 </template>
 
 <script setup>
+import { ref } from 'vue'
+
 const props = defineProps({
-  task: { type: Object, default: null }
+  task: { type: Object, default: null },
+  tmuxAttachCommand: { type: String, default: '' }
 })
 const emit = defineEmits(['done', 'skip'])
+const copied = ref(false)
 
 function modeLabel(mode) {
   const map = {
@@ -36,6 +46,21 @@ function modeLabel(mode) {
     ralph_loop: 'Ralph 循环'
   }
   return map[mode] || mode
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'absolute'; ta.style.left = '-9999px'
+    document.body.appendChild(ta); ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+  }
+  copied.value = true
+  setTimeout(() => { copied.value = false }, 1500)
 }
 </script>
 
@@ -156,5 +181,38 @@ function modeLabel(mode) {
 }
 .btn-warn:hover {
   box-shadow: 0 4px 14px rgba(245, 158, 11, 0.35);
+}
+.running-tmux {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  background: var(--canvas-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--canvas-border);
+}
+.tmux-code {
+  flex: 1;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  color: var(--accent-orange);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tmux-copy {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--canvas-border);
+  background: var(--canvas-card);
+  color: var(--canvas-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tmux-copy:hover {
+  background: var(--accent-purple-soft);
+  color: var(--accent-purple);
 }
 </style>

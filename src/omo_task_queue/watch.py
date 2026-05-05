@@ -7,6 +7,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from omo_task_queue.confirmed_session import (
+    ConfirmedSessionStore,
+    resolve_confirmed_session_id,
+)
 from omo_task_queue.logging_config import setup_logging
 from omo_task_queue.notifier import EmailNotifier, MockNotifier, NotificationConfig
 from omo_task_queue.opencode_observer import OpenCodeObserver
@@ -56,8 +60,24 @@ class WatchLoop:
             self.run_once()
             time.sleep(self._poll_interval_seconds)
 
+    def _get_confirmed_session(self) -> str | None:
+        return resolve_confirmed_session_id(self._project_path)
+
+    def _load_tmux_target_for_session(self, session_id: str | None):
+        if session_id:
+            short_id = ConfirmedSessionStore.session_short_id(session_id)
+            target_store = TmuxTargetStore(
+                Path(self._project_path) / f".omo_tmux_target.{short_id}.json"
+            )
+            target = target_store.load()
+            if target is not None:
+                return target
+        return self._tmux_target_store.load()
+
     def run_once(self) -> None:
-        session_id = self._observer.locate_primary_session()
+        session_id = self._get_confirmed_session()
+        if session_id is None:
+            session_id = self._observer.locate_primary_session()
         if session_id is None:
             logger.info("No primary OpenCode session found for project yet")
             return
@@ -72,7 +92,7 @@ class WatchLoop:
             snapshot.latest_message_completed_ms,
             snapshot.latest_activity_ms,
         )
-        recovered = self._recover_running_task(snapshot)
+        recovered = self._recover_running_task(snapshot, session_id)
         if recovered:
             return
 
@@ -195,7 +215,6 @@ class WatchLoop:
         )
         task = self._store.get_task(next_task.id, project_path=self._project_path)
         if self._is_tmux_recovery_error(error_text):
-            self._tmux_target_store.clear()
             if task is not None:
                 if task.status is not TaskStatus.RETRY_WAIT:
                     StateMachine.transition(task, TaskStatus.RETRY_WAIT)
@@ -222,6 +241,12 @@ class WatchLoop:
         task = self._next_actionable_task()
         if task is None:
             return
+        if (
+            task.status is TaskStatus.RETRY_WAIT
+            and task.target_session_id != session_id
+        ):
+            task.target_session_id = session_id
+            self._store.update_task(task)
         ensure_target = getattr(self._continuer, "ensure_task_target", None)
         if ensure_target is None:
             return
@@ -271,6 +296,8 @@ class WatchLoop:
         if due_task is None:
             return False
 
+        if due_task.target_session_id != session_id:
+            due_task.target_session_id = session_id
         self._retry_manager.schedule_retry(due_task)
         self._store.update_task(due_task)
         logger.info(
@@ -288,18 +315,20 @@ class WatchLoop:
         return any(
             token in error_text
             for token in (
+                "failed to create tmux target",
                 "tmux pane not ready",
                 "can't find pane",
                 "can't find session",
                 "tmux pane missing",
                 "tmux session not running",
+                "tmux target session mismatch",
             )
         )
 
     def _is_tmux_recovery_task(self, task) -> bool:
         return self._is_tmux_recovery_error(task.error_message)
 
-    def _recover_running_task(self, snapshot) -> bool:
+    def _recover_running_task(self, snapshot, session_id: str) -> bool:
         state = self._state_store.load()
         if state is None:
             return False
@@ -323,6 +352,27 @@ class WatchLoop:
             logger.info(
                 "watch.recover_clear task_id=%s reason=task_missing_or_not_running",
                 state.task_id,
+            )
+            self._state_store.clear()
+            return False
+
+        if state.session_id != session_id:
+            logger.warning(
+                "watch.recover_reset task_id=%s old_session=%s new_session=%s",
+                task.id,
+                state.session_id,
+                session_id,
+            )
+            StateMachine.transition(task, TaskStatus.RETRY_WAIT)
+            task.target_session_id = session_id
+            task.error_message = "Continuation session changed"
+            task.updated_at = datetime.utcnow()
+            self._store.update_task(task)
+            self._write_status(
+                snapshot,
+                decision="recover_reset",
+                reason="session_changed",
+                last_error=task.error_message,
             )
             self._state_store.clear()
             return False
@@ -413,7 +463,7 @@ class WatchLoop:
     ) -> None:
         running_task = self._store.get_running_task(project_path=self._project_path)
         pending_task = self._store.get_next_pending(project_path=self._project_path)
-        tmux_target = self._tmux_target_store.load()
+        tmux_target = self._load_tmux_target_for_session(self._get_confirmed_session())
         self._watcher_status_store.save(
             WatcherStatusSnapshot(
                 heartbeat_ms=int(time.time() * 1000),

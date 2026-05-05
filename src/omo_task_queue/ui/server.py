@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import asdict
@@ -12,10 +13,18 @@ from typing import Any, Callable, Optional
 from omo_task_queue.notifier import EmailNotifier, MockNotifier
 from omo_task_queue.project_registry import ProjectRegistry
 from omo_task_queue.retry import RetryManager
+from omo_task_queue.confirmed_session import (
+    ConfirmedSession,
+    ConfirmedSessionStore,
+    resolve_confirmed_session_id,
+)
+from omo_task_queue.session_selection import SessionSelection, SessionSelectionStore
 from omo_task_queue.session_selection import ProjectSessionService
+from omo_task_queue.session_continuer import ContinuationStateStore
 from omo_task_queue.state import ExecutionMode, StateMachine, Task, TaskStatus
 from omo_task_queue.notifier import NotificationConfig
 from omo_task_queue.store import Config, SQLiteStore
+from omo_task_queue.watcher_status import WatcherStatusStore
 from omo_task_queue.ui.panel import (
     AddTaskRequest,
     PanelHandler,
@@ -89,7 +98,72 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
     def _send_404(self) -> None:
         self._send_json({"error": "Not found"}, 404)
 
-    def _start_project_server(self, project_path: str) -> dict[str, Any]:
+    def _resolve_project_session_id(
+        self, project_path: str, preferred_session_id: str = ""
+    ) -> str:
+        from omo_task_queue.opencode_observer import OpenCodeObserver
+
+        observer = OpenCodeObserver(
+            Path.home() / ".local" / "share" / "opencode" / "opencode.db",
+            project_path,
+        )
+        preferred = preferred_session_id.strip()
+        if preferred and observer.session_belongs_to_project(preferred):
+            return preferred
+        if preferred:
+            return preferred
+        return observer.locate_primary_session() or ""
+
+    def _persist_project_session_confirmation(
+        self, project_path: str, session_id: str
+    ) -> None:
+        if not session_id:
+            return
+        project_dir = Path(project_path)
+        previous_confirmed = ConfirmedSessionStore(project_dir).load()
+        previous_session_id = (
+            previous_confirmed.session_id if previous_confirmed is not None else None
+        )
+        SessionSelectionStore(project_dir / ".omo_selected_session.json").save(
+            SessionSelection(session_id=session_id)
+        )
+        short_id = ConfirmedSessionStore.session_short_id(session_id)
+        ConfirmedSessionStore(project_dir).save(
+            ConfirmedSession(
+                session_id=session_id,
+                session_short_id=short_id,
+                project_dir=str(project_dir.resolve()),
+            )
+        )
+        if previous_session_id and previous_session_id != session_id:
+            for task in self.panel._store.list_tasks(
+                project_path=str(project_dir.resolve())
+            ):
+                if (
+                    task.status is TaskStatus.RUNNING
+                    and task.target_session_id == previous_session_id
+                ):
+                    StateMachine.transition(task, TaskStatus.RETRY_WAIT)
+                    task.target_session_id = session_id
+                    task.error_message = "Continuation session changed"
+                    self.panel._store.update_task(task)
+                    continue
+                if (
+                    task.status in {TaskStatus.PENDING, TaskStatus.RETRY_WAIT}
+                    and task.target_session_id == previous_session_id
+                ):
+                    task.target_session_id = session_id
+                    self.panel._store.update_task(task)
+            ContinuationStateStore(
+                project_dir / ".omo_session_watch_state.json"
+            ).clear()
+            status_path = project_dir / ".omo_watcher_status.json"
+            if status_path.exists():
+                status_path.unlink()
+
+    def _start_project_server(
+        self, project_path: str, session_id: str = ""
+    ) -> dict[str, Any]:
         if not project_path:
             return {"success": False, "error": "Project path is required"}
 
@@ -100,15 +174,39 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
                 "error": f"Project directory does not exist: {project_path}",
             }
 
+        resolved_session_id = self._resolve_project_session_id(project_path, session_id)
+
         if self.project_registry:
             projects = self.project_registry.list_projects()
             for p in projects:
                 if p.project_path == project_path and p.api_base_url:
-                    return {
-                        "success": True,
-                        "api_base_url": p.api_base_url,
-                        "message": "Server already running",
-                    }
+                    import urllib.request
+
+                    try:
+                        urllib.request.urlopen(
+                            p.api_base_url + "/api/status", timeout=2
+                        )
+                        self._start_project_watcher(project_path)
+                        if resolved_session_id:
+                            self._persist_project_session_confirmation(
+                                project_path, resolved_session_id
+                            )
+                            tmux_result = self._ensure_project_tmux(
+                                project_path, resolved_session_id
+                            )
+                            if not tmux_result["success"]:
+                                logger.warning(
+                                    "Tmux ensure failed for %s: %s",
+                                    project_path,
+                                    tmux_result.get("error"),
+                                )
+                        return {
+                            "success": True,
+                            "api_base_url": p.api_base_url,
+                            "message": "Server already running",
+                        }
+                    except Exception:
+                        pass
 
         import socket
 
@@ -155,6 +253,22 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
                     api_base_url=api_base_url,
                 )
 
+            self._start_project_watcher(project_path)
+
+            if resolved_session_id:
+                self._persist_project_session_confirmation(
+                    project_path, resolved_session_id
+                )
+                tmux_result = self._ensure_project_tmux(
+                    project_path, resolved_session_id
+                )
+                if not tmux_result["success"]:
+                    logger.warning(
+                        "Tmux ensure failed for %s: %s",
+                        project_path,
+                        tmux_result.get("error"),
+                    )
+
             return {
                 "success": True,
                 "api_base_url": api_base_url,
@@ -163,6 +277,111 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
 
         except Exception as e:
             return {"success": False, "error": f"Failed to start server: {str(e)}"}
+
+    def _start_project_watcher(self, project_path: str) -> None:
+        self._kill_existing_watcher(project_path)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent.parent)
+        watcher_cmd = [
+            sys.executable,
+            "-m",
+            "omo_task_queue.watch",
+            "--directory",
+            str(project_path),
+            "--poll-interval",
+            "5",
+            "--log-level",
+            "INFO",
+        ]
+        try:
+            subprocess.Popen(
+                watcher_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=str(project_path),
+                env=env,
+            )
+            logger.info("Started watcher for project: %s", project_path)
+        except Exception as e:
+            logger.error("Failed to start watcher for %s: %s", project_path, e)
+
+    @staticmethod
+    def _kill_existing_watcher(project_path: str) -> None:
+        marker = f"omo_task_queue.watch.*--directory {project_path}"
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", marker],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.info("Killed existing watchers for project: %s", project_path)
+        except FileNotFoundError:
+            pass
+
+    def _ensure_project_tmux(
+        self, project_path: str, session_id: str
+    ) -> dict[str, Any]:
+        from omo_task_queue.tmux_target import TmuxTargetStore
+        from omo_task_queue.confirmed_session import ConfirmedSessionStore
+
+        project_dir = Path(project_path)
+        short_id = ConfirmedSessionStore.session_short_id(session_id)
+        tmux_store = TmuxTargetStore(project_dir / f".omo_tmux_target.{short_id}.json")
+
+        try:
+            target = tmux_store.ensure_target(
+                project_dir=project_dir,
+                opencode_session_id=session_id,
+            )
+            return {
+                "success": True,
+                "tmux_session_name": target.session_name,
+                "tmux_pane_id": target.pane_id,
+                "attach_command": target.attach_command,
+            }
+        except RuntimeError as exc:
+            error_msg = str(exc)
+            if (
+                "failed to create tmux target" in error_msg
+                or "tmux" in error_msg.lower()
+            ):
+                logger.error("Tmux creation failed for %s: %s", project_path, error_msg)
+            return {"success": False, "error": error_msg}
+
+    def _forward_task_to_project(
+        self, payload: dict[str, Any], target_project: str
+    ) -> dict[str, Any]:
+        if not self.project_registry:
+            return {"success": False, "error": "Project registry unavailable"}
+        projects = self.project_registry.list_projects()
+        target = next(
+            (
+                p
+                for p in projects
+                if p.project_path == target_project and p.api_base_url
+            ),
+            None,
+        )
+        if target is None:
+            return {
+                "success": False,
+                "error": f"Target project not running: {target_project}",
+            }
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"{target.api_base_url}/api/tasks",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            return {"success": False, "error": f"Forward failed: {exc}"}
 
     def _default_status(self) -> dict[str, Any]:
         counts = {
@@ -179,6 +398,7 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
             "counts": counts,
             "primary_session_id": None,
             "selected_session_id": None,
+            "confirmed_session_id": None,
             "watcher_running": False,
             "watcher_decision": None,
             "watcher_reason": None,
@@ -275,7 +495,8 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             payload = _parse_json(body)
             project_path = payload.get("project_path", "")
-            result = self._start_project_server(project_path)
+            session_id = payload.get("session_id", "")
+            result = self._start_project_server(project_path, session_id)
             self._send_json(result)
             return
 
@@ -321,11 +542,17 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/projects/start":
             project_path = payload.get("project_path", "")
-            result = self._start_project_server(project_path)
+            session_id = payload.get("session_id", "")
+            result = self._start_project_server(project_path, session_id)
             self._send_json(result)
             return
 
         if path in {"/api/tasks", "/api/queue"}:
+            target_project = payload.get("target_project", "")
+            if target_project and target_project != self.panel._project_path:
+                result = self._forward_task_to_project(payload, target_project)
+                self._send_json(result)
+                return
             req = AddTaskRequest(
                 title=payload.get("title", ""),
                 prompt=payload.get("prompt", ""),
@@ -401,6 +628,54 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(
                 {"success": True, "data": {"selected_session_id": selected}}
+            )
+            return
+
+        if path == "/api/sessions/confirm":
+            if self.session_service is None:
+                self._send_json(
+                    {"success": False, "error": "Session service unavailable"}, 400
+                )
+                return
+            session_id = str(payload.get("session_id", "")).strip()
+            if not session_id:
+                self._send_json(
+                    {"success": False, "error": "session_id is required"}, 400
+                )
+                return
+            try:
+                self.session_service.select_session(session_id)
+            except ValueError as exc:
+                self._send_json({"success": False, "error": str(exc)}, 400)
+                return
+            self._persist_project_session_confirmation(
+                self.panel._project_path, session_id
+            )
+            tmux_result = self._ensure_project_tmux(
+                self.panel._project_path, session_id
+            )
+            if not tmux_result["success"]:
+                logger.warning(
+                    "Tmux ensure failed for session confirm %s: %s",
+                    session_id,
+                    tmux_result.get("error"),
+                )
+                self._send_json(
+                    {
+                        "success": False,
+                        "error": tmux_result.get("error", "tmux ensure failed"),
+                    },
+                    500,
+                )
+                return
+            self._send_json(
+                {
+                    "success": True,
+                    "data": {
+                        "confirmed_session_id": session_id,
+                        "tmux_session_name": tmux_result.get("tmux_session_name"),
+                    },
+                }
             )
             return
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -143,13 +144,15 @@ def test_ensure_target_rejects_unstable_session(monkeypatch, tmp_path: Path) -> 
     calls = {"has_session": 0}
 
     def fake_run(command, capture_output, text, check, env=None):
-        if command[1:2] == ["new-session"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[1:3] == ["list-panes", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
         if command[1:3] == ["has-session", "-t"]:
             calls["has_session"] += 1
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="gone")
+        if len(command) > 1 and command[1].endswith("restart-opencode-tmux-generic.sh"):
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="tmux pane not ready"
+            )
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -167,13 +170,24 @@ def test_ensure_target_uses_unique_session_name_when_base_exists(
 
     def fake_run(command, capture_output, text, check, env=None):
         commands.append(command)
-        if command[1:3] == ["kill-session", "-t"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[1:2] == ["new-session"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[1:3] == ["list-panes", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
         if command[1:3] == ["has-session", "-t"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if len(command) > 1 and command[1].endswith("restart-opencode-tmux-generic.sh"):
+            target_file = Path(command[-1])
+            target_file.write_text(
+                json.dumps(
+                    {
+                        "session_name": command[3],
+                        "pane_id": "%9",
+                        "attach_command": f"tmux attach -t {command[3]}",
+                        "project_dir": command[4],
+                        "opencode_session_id": command[5],
+                    }
+                ),
+                encoding="utf-8",
+            )
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
@@ -182,9 +196,12 @@ def test_ensure_target_uses_unique_session_name_when_base_exists(
 
     target = store.ensure_target(project_dir=tmp_path, opencode_session_id="ses-1")
 
-    assert any(command[1:3] == ["kill-session", "-t"] for command in commands)
+    assert any(
+        len(command) > 1 and command[1].endswith("restart-opencode-tmux-generic.sh")
+        for command in commands
+    )
     assert target.session_name.startswith("omo-")
-    assert target.session_name.count("-") == 1
+    assert target.session_name.endswith("-ses-1")
 
 
 def test_ensure_target_clears_stale_metadata_when_existing_target_invalid(
@@ -207,12 +224,6 @@ def test_ensure_target_clears_stale_metadata_when_existing_target_invalid(
     created_sessions: list[str] = []
 
     def fake_run(command, capture_output, text, check, env=None):
-        if command[1:3] == ["kill-session", "-t"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[1:2] == ["new-session"]:
-            session_name = command[command.index("-s") + 1]
-            created_sessions.append(session_name)
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[1:3] == ["has-session", "-t"]:
             session_name = command[-1]
             if created_sessions and session_name == created_sessions[-1]:
@@ -220,6 +231,22 @@ def test_ensure_target_clears_stale_metadata_when_existing_target_invalid(
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="gone")
         if command[1:3] == ["list-panes", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
+        if len(command) > 1 and command[1].endswith("restart-opencode-tmux-generic.sh"):
+            created_sessions.append(command[3])
+            target_file = Path(command[-1])
+            target_file.write_text(
+                json.dumps(
+                    {
+                        "session_name": command[3],
+                        "pane_id": "%9",
+                        "attach_command": f"tmux attach -t {command[3]}",
+                        "project_dir": command[4],
+                        "opencode_session_id": command[5],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -255,19 +282,29 @@ def test_ensure_target_reuses_fixed_project_session_name(
     created_sessions: list[str] = []
 
     def fake_run(command, capture_output, text, check, env=None):
-        if command[1:3] == ["kill-session", "-t"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[1:3] == ["has-session", "-t"]:
             session_name = command[-1]
             if created_sessions and session_name == created_sessions[-1]:
                 return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="gone")
-        if command[1:2] == ["new-session"]:
-            session_name = command[command.index("-s") + 1]
-            created_sessions.append(session_name)
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[1:3] == ["list-panes", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
+        if len(command) > 1 and command[1].endswith("restart-opencode-tmux-generic.sh"):
+            created_sessions.append(command[3])
+            target_file = Path(command[-1])
+            target_file.write_text(
+                json.dumps(
+                    {
+                        "session_name": command[3],
+                        "pane_id": "%9",
+                        "attach_command": f"tmux attach -t {command[3]}",
+                        "project_dir": command[4],
+                        "opencode_session_id": command[5],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -278,7 +315,7 @@ def test_ensure_target_reuses_fixed_project_session_name(
     assert created_sessions
     assert created_sessions[0] != "omo-old-fixed"
     assert created_sessions[0].startswith("omo-")
-    assert created_sessions[0].count("-") == 1
+    assert created_sessions[0].endswith("-ses-1")
     assert target.session_name == created_sessions[0]
 
 
@@ -289,14 +326,14 @@ def test_ensure_target_clears_metadata_after_pane_not_ready_failure(
     store = TmuxTargetStore(target_path)
 
     def fake_run(command, capture_output, text, check, env=None):
-        if command[1:3] == ["kill-session", "-t"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[1:2] == ["new-session"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[1:3] == ["list-panes", "-t"]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
         if command[1:3] == ["has-session", "-t"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="gone")
+        if len(command) > 1 and command[1].endswith("restart-opencode-tmux-generic.sh"):
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="tmux pane not ready"
+            )
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -322,6 +359,9 @@ def test_ensure_target_prefers_restart_script_and_reloads_saved_target(
     def fake_run(command, capture_output, text, check, env=None, cwd=None):
         calls.append(command)
         if command == [str(script_path)]:
+            assert env is not None
+            assert env["OPENCODE_SESSION_ID"] == "ses-1"
+            assert env["OMO_TMUX_TARGET_FILE"] == str(target_path)
             target_path.write_text(
                 json.dumps(
                     {
@@ -348,3 +388,70 @@ def test_ensure_target_prefers_restart_script_and_reloads_saved_target(
     assert calls[0] == [str(script_path)]
     assert target.session_name == "omo-scripted"
     assert target.pane_id == "%7"
+
+
+def test_restart_project_script_uses_confirmed_protocol(tmp_path: Path) -> None:
+    script_path = tmp_path / "scripts" / "restart-opencode-tmux.sh"
+    helper_path = tmp_path / "scripts" / "restart-opencode-tmux-generic.sh"
+    script_path.parent.mkdir()
+    helper_path.write_text(
+        '#!/bin/zsh\nprintf \'%s\\n\' "$1|$2|$3|$4|$5" > "$3/helper-args.txt"\n',
+        encoding="utf-8",
+    )
+    helper_path.chmod(0o755)
+    script_path.write_text(
+        (
+            Path(__file__).resolve().parents[1] / "scripts" / "restart-opencode-tmux.sh"
+        ).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+    (tmp_path / ".omo_confirmed_session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "ses_abcdef12ZZZZ",
+                "session_short_id": "abcdef12",
+                "project_dir": str(tmp_path.resolve()),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    db_dir = tmp_path / ".home" / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    db_path = db_dir / "opencode.db"
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, time_updated INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO session (id, directory, parent_id, time_updated) VALUES (?, ?, NULL, 1)",
+        ("ses_abcdef12ZZZZ", tmp_path.resolve().as_posix()),
+    )
+    conn.commit()
+    conn.close()
+
+    env = {
+        "HOME": str(tmp_path / ".home"),
+        "TMUX_BIN": "/custom/tmux",
+        "PATH": f"{script_path.parent}:{os.environ.get('PATH', '')}",
+        "OMO_TMUX_TARGET_FILE": str(tmp_path / ".omo_tmux_target.abcdef12.json"),
+    }
+    result = subprocess.run(
+        [str(script_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(tmp_path),
+        env=env,
+    )
+
+    assert result.returncode == 0
+    helper_args = (tmp_path / "helper-args.txt").read_text(encoding="utf-8").strip()
+    assert helper_args == "/custom/tmux|omo-" + __import__("hashlib").sha256(
+        tmp_path.resolve().as_posix().encode()
+    ).hexdigest()[:12] + "-abcdef12|" + str(
+        tmp_path.resolve()
+    ) + "|ses_abcdef12ZZZZ|" + str(tmp_path / ".omo_tmux_target.abcdef12.json")

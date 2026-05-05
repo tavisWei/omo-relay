@@ -204,7 +204,8 @@ class TmuxTargetStore:
             self.clear()
 
         project_hash = hashlib.sha256(project_dir.encode()).hexdigest()[:12]
-        session_name = f"omo-{project_hash}"
+        session_short = opencode_session_id.replace("ses_", "")[:8]
+        session_name = f"omo-{project_hash}-{session_short}"
         self._restart_target_session(
             session_name=session_name,
             project_dir=project_dir,
@@ -234,6 +235,8 @@ class TmuxTargetStore:
             env = tmux_environment()
             env["TMUX_BIN"] = self._tmux_executable
             env["OPENCODE_TMUX_SESSION"] = session_name
+            env["OPENCODE_SESSION_ID"] = opencode_session_id
+            env["OMO_TMUX_TARGET_FILE"] = str(self._path)
             result = subprocess.run(
                 [str(script_path)],
                 capture_output=True,
@@ -250,23 +253,20 @@ class TmuxTargetStore:
                 )
             return
 
-        subprocess.run(
-            [self._tmux_executable, "kill-session", "-t", session_name],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=tmux_environment(),
+        helper_script = (
+            Path(__file__).resolve().parent.parent.parent
+            / "scripts"
+            / "restart-opencode-tmux-generic.sh"
         )
         result = subprocess.run(
             [
+                "/bin/zsh",
+                str(helper_script),
                 self._tmux_executable,
-                "new-session",
-                "-d",
-                "-s",
                 session_name,
-                "-c",
                 project_dir,
-                build_opencode_launch_command(opencode_session_id),
+                opencode_session_id,
+                str(self._path),
             ],
             capture_output=True,
             text=True,
@@ -279,19 +279,8 @@ class TmuxTargetStore:
                 or result.stdout.strip()
                 or "failed to create tmux target"
             )
-        time.sleep(3)
-        pane_id = self._wait_for_pane_id(session_name)
-        self.save(
-            TmuxTarget(
-                session_name=session_name,
-                pane_id=pane_id,
-                attach_command=build_attach_command(
-                    self._tmux_executable, session_name
-                ),
-                project_dir=project_dir,
-                opencode_session_id=opencode_session_id,
-            )
-        )
+        if self.load() is None:
+            raise RuntimeError("failed to create tmux target")
 
     def _wait_for_pane_id(self, session_name: str, attempts: int = 20) -> str:
         for _ in range(attempts):

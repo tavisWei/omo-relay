@@ -57,6 +57,10 @@ export const api = {
     return request('POST', '/api/sessions/select', { session_id: sessionId })
   },
 
+  confirmSession(sessionId) {
+    return request('POST', '/api/sessions/confirm', { session_id: sessionId })
+  },
+
   /** Add a new task */
   addTask(task) {
     return request('POST', '/api/queue', task)
@@ -101,10 +105,10 @@ export const api = {
     return request('POST', '/api/notify/config', config)
   },
 
-  startProject(projectPath) {
+  startProject(projectPath, sessionId = '') {
     const saved = activeBaseUrl
     activeBaseUrl = DEFAULT_BASE_URL
-    return request('POST', '/api/projects/start', { project_path: projectPath }).finally(() => {
+    return request('POST', '/api/projects/start', { project_path: projectPath, session_id: sessionId }).finally(() => {
       activeBaseUrl = saved
     })
   }

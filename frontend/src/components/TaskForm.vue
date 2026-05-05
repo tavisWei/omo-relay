@@ -70,7 +70,15 @@
                 {{ s.name || s.id }}
               </option>
             </select>
-            <span class="selector-hint">{{ selectedSessionLabel }}</span>
+            <button
+              v-if="modelValue && modelValue !== confirmedSessionId"
+              class="btn btn-sm btn-primary"
+              @click="$emit('confirmSession', modelValue)"
+            >
+              确认
+            </button>
+            <span v-else-if="modelValue === confirmedSessionId" class="selector-hint confirmed">已确认</span>
+            <span v-else class="selector-hint">{{ selectedSessionLabel }}</span>
           </div>
         </div>
       </div>
@@ -86,10 +94,11 @@ const props = defineProps({
   selectedProjectPath: { type: String, default: '' },
   sessions: { type: Array, default: () => [] },
   modelValue: { type: String, default: '' },
-  starting: { type: Boolean, default: false }
+  starting: { type: Boolean, default: false },
+  confirmedSessionId: { type: String, default: '' }
 })
 
-const emit = defineEmits(['add', 'update:selectedProjectPath', 'update:modelValue', 'startProject'])
+const emit = defineEmits(['add', 'update:selectedProjectPath', 'update:modelValue', 'startProject', 'confirmSession'])
 
 const selectedProject = computed(() => {
   return props.projects.find(p => p.project_path === props.selectedProjectPath)
@@ -258,6 +267,10 @@ function reset() {
   font-weight: 600;
   color: var(--accent-orange);
   white-space: nowrap;
+}
+
+.selector-hint.confirmed {
+  color: var(--accent-green);
 }
 
 .btn {

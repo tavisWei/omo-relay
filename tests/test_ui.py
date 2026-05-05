@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import pytest
 
+from omo_task_queue.confirmed_session import ConfirmedSession, ConfirmedSessionStore
 from omo_task_queue.state import ExecutionMode, Task, TaskStatus
+from omo_task_queue.tmux_target import TmuxTargetStore
 from omo_task_queue.ui.panel import (
     AddTaskRequest,
     PanelHandler,
@@ -264,6 +267,83 @@ def test_list_queue_ordered(handler, store):
     assert resp.data["completed"][0].title == "C"
 
 
+def test_list_queue_uses_confirmed_session_tmux_target(store, tmp_path: Path):
+    ConfirmedSessionStore(tmp_path).save(
+        ConfirmedSession(
+            session_id="sess-2",
+            session_short_id=ConfirmedSessionStore.session_short_id("sess-2"),
+            project_dir=str(tmp_path.resolve()),
+        )
+    )
+    confirmed_target = tmp_path / ".omo_tmux_target.sess-2.json"
+    confirmed_target.write_text(
+        '{"session_name":"omo-confirmed","pane_id":"%9","attach_command":"tmux attach -t omo-confirmed","project_dir":"'
+        + str(tmp_path.resolve())
+        + '","opencode_session_id":"sess-2"}',
+        encoding="utf-8",
+    )
+    handler = PanelHandler(
+        store,
+        tmux_target_store=FakeTmuxTargetStore(),
+        project_path=str(tmp_path.resolve()),
+    )
+    store.add_task(
+        Task(
+            id="a",
+            title="A",
+            prompt="pA",
+            mode=ExecutionMode.ONE_SHOT,
+            project_path=str(tmp_path.resolve()),
+        )
+    )
+
+    resp = handler.handle(UIAction.LIST_QUEUE)
+    assert resp.success is True
+    assert resp.data["active"][0].tmux_attach_command.endswith(
+        " attach -t omo-confirmed"
+    )
+
+
+def test_list_queue_bootstraps_confirmed_from_selected_for_tmux_target(
+    store, tmp_path: Path
+):
+    (tmp_path / ".omo_selected_session.json").write_text(
+        '{"session_id": "ses_2270156d9ffe33uxKkI8VyTAMR"}',
+        encoding="utf-8",
+    )
+    (tmp_path / ".omo_tmux_target.json").write_text(
+        '{"session_name":"omo-stale","pane_id":"%1","attach_command":"tmux attach -t omo-stale","project_dir":"'
+        + str(tmp_path.resolve())
+        + '","opencode_session_id":"ses_old"}',
+        encoding="utf-8",
+    )
+    (tmp_path / ".omo_tmux_target.2270156d.json").write_text(
+        '{"session_name":"omo-session","pane_id":"%205","attach_command":"tmux attach -t omo-session","project_dir":"'
+        + str(tmp_path.resolve())
+        + '","opencode_session_id":"ses_2270156d9ffe33uxKkI8VyTAMR"}',
+        encoding="utf-8",
+    )
+    handler = PanelHandler(
+        store,
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+    )
+    store.add_task(
+        Task(
+            id="boot-1",
+            title="Boot",
+            prompt="p",
+            mode=ExecutionMode.ONE_SHOT,
+            project_path=str(tmp_path.resolve()),
+        )
+    )
+
+    resp = handler.handle(UIAction.LIST_QUEUE)
+
+    assert resp.success is True
+    assert resp.data["active"][0].tmux_attach_command.endswith(" attach -t omo-session")
+
+
 def test_get_running_none(handler):
     resp = handler.handle(UIAction.GET_RUNNING)
     assert resp.success is True
@@ -402,6 +482,41 @@ def test_retry_moves_task_back_to_pending(handler, store):
     assert updated.retry_count == 0
     assert updated.error_message is None
     assert updated.completed_at is None
+
+
+def test_retry_resets_target_session_to_current_resolved_session(store):
+    class ResolverHandler(PanelHandler):
+        pass
+
+    handler = ResolverHandler(
+        store,
+        project_path="",
+        session_resolver=lambda: "ses-current",
+    )
+    task = Task(
+        id="retry-session",
+        title="Retry",
+        prompt="p",
+        mode=ExecutionMode.ONE_SHOT,
+        target_session_id="ses-old",
+    )
+    store.add_task(task)
+    store.update_status(task.id, TaskStatus.DONE)
+    task.retry_count = 2
+    task.error_message = "boom"
+    task.completed_at = datetime.utcnow()
+    store.update_task(task)
+
+    resp = handler.retry(TaskActionRequest(task_id=task.id))
+
+    assert resp.success is True
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.status == TaskStatus.PENDING
+    assert updated.retry_count == 0
+    assert updated.error_message is None
+    assert updated.completed_at is None
+    assert updated.target_session_id == "ses-current"
 
 
 def test_retry_rejects_running_task(handler, store):

@@ -5,9 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
+from omo_task_queue.confirmed_session import (
+    ConfirmedSessionStore,
+    resolve_confirmed_session_id,
+)
 from omo_task_queue.state import ExecutionMode, Task, TaskStatus
+from omo_task_queue.tmux_target import TmuxTargetStore
 
 
 class UIAction(str, Enum):
@@ -232,11 +238,14 @@ class PanelHandler:
         if task.status is TaskStatus.RUNNING:
             return UIResponse(success=False, error="Running task cannot be retried")
         existing_tasks = self._store.list_tasks(project_path=self._project_path)
+        resolved_session_id = self._resolve_session_id()
         task.order = max((item.order for item in existing_tasks), default=0) + 1
         task.status = TaskStatus.PENDING
         task.retry_count = 0
         task.completed_at = None
         task.error_message = None
+        if resolved_session_id is not None:
+            task.target_session_id = resolved_session_id
         task.updated_at = datetime.utcnow()
         self._store.update_task(task)
         self._maybe_start_queue()
@@ -252,10 +261,26 @@ class PanelHandler:
             return UIResponse(success=False, error=str(exc))
 
     def _tmux_attach_command(self) -> Optional[str]:
+        target = self._load_tmux_target()
+        return target.attach_command if target else None
+
+    def _load_tmux_target(self):
+        confirmed_session_id = None
+        if self._project_path:
+            confirmed_session_id = resolve_confirmed_session_id(
+                self._project_path, self._resolve_session_id()
+            )
+        if confirmed_session_id is not None:
+            short_id = ConfirmedSessionStore.session_short_id(confirmed_session_id)
+            target_store = TmuxTargetStore(
+                Path(self._project_path) / f".omo_tmux_target.{short_id}.json"
+            )
+            target = target_store.load()
+            if target is not None:
+                return target
         if self._tmux_target_store is None:
             return None
-        target = self._tmux_target_store.load()
-        return target.attach_command if target else None
+        return self._tmux_target_store.load()
 
     def _resolve_session_id(self) -> Optional[str]:
         if self._session_resolver is None:

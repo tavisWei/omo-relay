@@ -12,49 +12,66 @@ PY
 )"
 
 TMUX_BIN="${TMUX_BIN:-$HOME/.local/bin/tmux}"
-SESSION_NAME="${OPENCODE_TMUX_SESSION:-omo-${PROJECT_KEY}}"
-TARGET_FILE="$ROOT_DIR/.omo_tmux_target.json"
+TARGET_FILE="${OMO_TMUX_TARGET_FILE:-$ROOT_DIR/.omo_tmux_target.json}"
 export DYLD_LIBRARY_PATH="$HOME/.local/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export PATH="$HOME/.local/bin:$PATH"
 
-PRIMARY_SESSION_ID="$(python3 - <<'PY'
+SESSION_INFO="$(python3 - "$ROOT_DIR" <<'PY'
+import json
 import sqlite3
 from pathlib import Path
+import hashlib
+import sys
+
+root = Path(sys.argv[1]).resolve()
+confirmed_path = root / '.omo_confirmed_session.json'
+selected_path = root / '.omo_selected_session.json'
+explicit = __import__('os').environ.get('OPENCODE_SESSION_ID', '').strip()
+
+session_id = explicit
+if not session_id and confirmed_path.exists():
+    session_id = json.loads(confirmed_path.read_text(encoding='utf-8')).get('session_id', '').strip()
+if not session_id and selected_path.exists():
+    session_id = json.loads(selected_path.read_text(encoding='utf-8')).get('session_id', '').strip()
+
 db = Path.home()/'.local/share/opencode/opencode.db'
 conn = sqlite3.connect(db)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
-row = cur.execute("SELECT id FROM session WHERE directory=? AND parent_id IS NULL ORDER BY time_updated DESC LIMIT 1", ('/Users/mrweij/Dev/vibe_coding/opencode/omo-looper',)).fetchone()
-print(row['id'] if row else '')
+if session_id:
+    row = cur.execute("SELECT id FROM session WHERE id=? AND directory=? LIMIT 1", (session_id, root.as_posix())).fetchone()
+    if row is None:
+        session_id = ''
+if not session_id:
+    row = cur.execute("SELECT id FROM session WHERE directory=? AND parent_id IS NULL ORDER BY time_updated DESC LIMIT 1", (root.as_posix(),)).fetchone()
+    session_id = row['id'] if row else ''
 conn.close()
+project_key = hashlib.sha256(root.as_posix().encode()).hexdigest()[:12]
+session_short = session_id.replace('ses_', '')[:8] if session_id else ''
+session_name = f"omo-{project_key}-{session_short}" if session_short else f"omo-{project_key}"
+print(json.dumps({"session_id": session_id, "session_name": session_name}))
 PY
 )"
 
-if [[ -z "$PRIMARY_SESSION_ID" ]]; then
+PRIMARY_SESSION_ID="$(python3 - <<'PY' "$SESSION_INFO"
+import json, sys
+print(json.loads(sys.argv[1]).get('session_id', ''))
+PY
+)"
+SESSION_NAME="${OPENCODE_TMUX_SESSION:-$(python3 - <<'PY' "$SESSION_INFO"
+import json, sys
+print(json.loads(sys.argv[1]).get('session_name', ''))
+PY
+)}"
+
+if [[ -z "$PRIMARY_SESSION_ID" || -z "$SESSION_NAME" ]]; then
   echo "no primary opencode session found for project" >&2
   exit 1
 fi
 
-"$TMUX_BIN" kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
-"$TMUX_BIN" new-session -d -s "$SESSION_NAME" "cd '$ROOT_DIR' && export DYLD_LIBRARY_PATH='$HOME/.local/lib' PATH='$HOME/.local/bin:$PATH' && exec opencode -s '$PRIMARY_SESSION_ID' ."
-
-sleep 3
-PANE_ID="$($TMUX_BIN list-panes -t "$SESSION_NAME" -F '#{pane_id}' | head -n 1)"
-
-python3 - <<'PY' "$TARGET_FILE" "$SESSION_NAME" "$PANE_ID" "$ROOT_DIR" "$PRIMARY_SESSION_ID" "$TMUX_BIN attach -t $SESSION_NAME"
-import json
-import sys
-from pathlib import Path
-
-target_file = Path(sys.argv[1])
-data = {
-    'session_name': sys.argv[2],
-    'pane_id': sys.argv[3],
-    'attach_command': sys.argv[6],
-    'project_dir': sys.argv[4],
-    'opencode_session_id': sys.argv[5],
-}
-target_file.write_text(json.dumps(data, indent=2, sort_keys=True), encoding='utf-8')
-PY
-
-echo "opencode tmux session ready: session=$SESSION_NAME pane=$PANE_ID primary_session=$PRIMARY_SESSION_ID"
+exec "$ROOT_DIR/scripts/restart-opencode-tmux-generic.sh" \
+  "$TMUX_BIN" \
+  "$SESSION_NAME" \
+  "$ROOT_DIR" \
+  "$PRIMARY_SESSION_ID" \
+  "$TARGET_FILE"

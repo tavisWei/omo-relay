@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from omo_task_queue.confirmed_session import resolve_confirmed_session_id
 from omo_task_queue.notifier import EmailNotifier, MockNotifier, NotificationConfig
 from omo_task_queue.opencode_observer import OpenCodeObserver
 from omo_task_queue.project_registry import ProjectRegistry
@@ -42,6 +43,14 @@ def _build_notifier(config: Config):
 def _api_base_url(host: str, port: int) -> str:
     resolved_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     return f"http://{resolved_host}:{port}"
+
+
+def _session_resolver(base_dir: Path, session_service: ProjectSessionService):
+    def resolve() -> str | None:
+        selected = session_service.get_selected_session_id()
+        return resolve_confirmed_session_id(base_dir, selected)
+
+    return resolve
 
 
 def main() -> None:
@@ -96,7 +105,7 @@ def main() -> None:
             notifier=notifier,
             tmux_target_store=tmux_target_store,
             project_path=str(base_dir),
-            session_resolver=session_service.get_selected_session_id,
+            session_resolver=_session_resolver(base_dir, session_service),
             host=args.host,
             port=args.port,
             static_dir=static_dir if static_dir.exists() else None,

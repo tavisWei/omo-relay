@@ -1,5 +1,5 @@
 #!/bin/zsh
-set -euo pipefail
+set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -12,9 +12,16 @@ print(hashlib.sha256(root.encode()).hexdigest()[:12])
 PY
 )"
 
-"$ROOT_DIR/scripts/restart-backend.sh"
-"$ROOT_DIR/scripts/restart-frontend.sh"
-"$ROOT_DIR/scripts/restart-opencode-tmux.sh"
-"$ROOT_DIR/scripts/restart-watcher.sh"
+echo "=== restarting backend ==="
+"$ROOT_DIR/scripts/restart-backend.sh" || echo "WARNING: backend restart failed (will retry next restart-all.sh)"
 
-echo "all services restarted for project=$PROJECT_KEY"
+echo "=== restarting frontend ==="
+"$ROOT_DIR/scripts/restart-frontend.sh" || echo "WARNING: frontend restart failed"
+
+echo "=== restarting opencode tmux ==="
+"$ROOT_DIR/scripts/restart-opencode-tmux.sh" || echo "WARNING: tmux restart failed"
+
+echo "=== restarting watcher ==="
+"$ROOT_DIR/scripts/restart-watcher.sh" || echo "WARNING: watcher restart failed"
+
+echo "all services restart attempted for project=$PROJECT_KEY"

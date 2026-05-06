@@ -18,6 +18,9 @@ TIMEOUT_SECONDS="${WATCHER_START_TIMEOUT:-20}"
 
 mkdir -p "$LOG_DIR"
 
+# Prevent stale bytecode from masking source changes
+find "$ROOT_DIR/src" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID="$(cat "$PID_FILE")"
   if kill -0 "$OLD_PID" >/dev/null 2>&1; then
@@ -27,7 +30,7 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-nohup env PYTHONPATH="$ROOT_DIR/src" python3 -m omo_task_queue.watch --directory "$ROOT_DIR" --poll-interval "$POLL_INTERVAL" --log-level INFO > "$LOG_FILE" 2>&1 &
+nohup env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT_DIR/src" python3 -m omo_task_queue.watch --directory "$ROOT_DIR" --poll-interval "$POLL_INTERVAL" --log-level INFO > "$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 

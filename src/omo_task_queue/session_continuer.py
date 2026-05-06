@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -77,21 +76,93 @@ class OpencodeSessionContinuer:
 
         prompt = self._build_prompt(task)
 
-        if not self._is_pane_ready(target.session_name):
+        pane_id = self._resolve_live_pane(target)
+        if pane_id is None:
+            return subprocess.CompletedProcess(
+                [self._tmux_executable],
+                1,
+                stdout="",
+                stderr="pane alignment failed — no live pane found for session",
+            )
+
+        if not self._is_pane_ready(pane_id):
+            self._send_escape(pane_id)
             for _ in range(30):
                 time.sleep(1)
-                if self._is_pane_ready(target.session_name):
+                if self._is_pane_ready(pane_id):
                     break
             time.sleep(15)
 
-        result = self._send_buffer(target.session_name, prompt)
+        result = self._send_command(pane_id, prompt)
         if result.returncode != 0:
             return result
-        return self._send_buffer(target.session_name, "\n")
 
-    def _is_pane_ready(self, session_name: str) -> bool:
+        time.sleep(0.5)
+        if not self._pane_exists(pane_id):
+            return subprocess.CompletedProcess(
+                [self._tmux_executable],
+                1,
+                stdout="",
+                stderr="pane disappeared after task paste — session may have been killed",
+            )
+        return result
+
+    def _send_escape(self, pane_target: str) -> None:
+        subprocess.run(
+            [self._tmux_executable, "send-keys", "-t", pane_target, "Escape"],
+            capture_output=True,
+            check=False,
+            env=tmux_environment(),
+        )
+
+    def _pane_exists(self, pane_target: str) -> bool:
         result = subprocess.run(
-            [self._tmux_executable, "capture-pane", "-t", session_name, "-p"],
+            [
+                self._tmux_executable,
+                "list-panes",
+                "-t",
+                pane_target,
+                "-F",
+                "#{pane_id}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=tmux_environment(),
+        )
+        return result.returncode == 0 and bool((result.stdout or "").strip())
+
+    def _resolve_live_pane(self, target: TmuxTarget) -> str | None:
+        pane_list = subprocess.run(
+            [
+                self._tmux_executable,
+                "list-panes",
+                "-t",
+                target.session_name,
+                "-F",
+                "#{pane_id}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=tmux_environment(),
+        )
+        if pane_list.returncode != 0:
+            return None
+        live_pane_id = (pane_list.stdout or "").strip().split("\n")[0]
+        if not live_pane_id:
+            return None
+        return live_pane_id
+
+    def _is_pane_ready(self, pane_target: str) -> bool:
+        """Check if the target pane is running OpenCode and ready for input.
+
+        Uses tmux pane ID (e.g. %271), which is globally unique, rather than
+        session name, to avoid targeting the wrong pane when the session's
+        active pane has changed (e.g. user attached and switched panes).
+        """
+        result = subprocess.run(
+            [self._tmux_executable, "capture-pane", "-t", pane_target, "-p"],
             capture_output=True,
             text=True,
             check=False,
@@ -99,20 +170,21 @@ class OpencodeSessionContinuer:
         )
         return result.returncode == 0 and "OpenCode" in (result.stdout or "")
 
-    def _send_buffer(
-        self, session_name: str, text: str
+    def _send_command(
+        self, pane_target: str, text: str
     ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            [self._tmux_executable, "load-buffer", "-"],
-            input=text.encode("utf-8"),
-            capture_output=True,
-            check=False,
-            env=tmux_environment(),
-        )
-        if result.returncode != 0:
-            return result
+        for ch in text:
+            result = subprocess.run(
+                [self._tmux_executable, "send-keys", "-t", pane_target, ch],
+                capture_output=True,
+                check=False,
+                env=tmux_environment(),
+            )
+            if result.returncode != 0:
+                return result
+            time.sleep(0.01)
         return subprocess.run(
-            [self._tmux_executable, "paste-buffer", "-t", session_name],
+            [self._tmux_executable, "send-keys", "-t", pane_target, "Enter"],
             capture_output=True,
             text=True,
             check=False,

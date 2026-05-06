@@ -37,8 +37,11 @@ class _ReadySnapshot:
 
 class _RecoveredWithoutAdvanceSnapshot(_ReadySnapshot):
     latest_message_id = "msg-1"
-    latest_message_completed_ms = 2_000
+    latest_message_completed_ms = 500
     latest_activity_ms = 2_000
+
+    def stalled(self, stalled_threshold: int) -> bool:
+        return True
 
 
 class _NotReadySnapshot(_ReadySnapshot):
@@ -161,7 +164,7 @@ def test_watch_loop_persists_actual_launch_error(tmp_path: Path) -> None:
     store.close()
 
 
-def test_watch_loop_tmux_pane_not_ready_does_not_increment_retry_budget(
+def test_watch_loop_tmux_pane_not_ready_increments_retry_count_once(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "queue.db")
@@ -199,13 +202,13 @@ def test_watch_loop_tmux_pane_not_ready_does_not_increment_retry_budget(
     updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
     assert updated is not None
     assert updated.status == TaskStatus.RETRY_WAIT
-    assert updated.retry_count == 0
+    assert updated.retry_count == 1
     assert updated.error_message == "tmux pane not ready"
 
     store.close()
 
 
-def test_watch_loop_tmux_target_creation_failure_does_not_increment_retry_budget(
+def test_watch_loop_tmux_target_creation_failure_increments_retry_count_once(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "queue.db")
@@ -243,7 +246,7 @@ def test_watch_loop_tmux_target_creation_failure_does_not_increment_retry_budget
     updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
     assert updated is not None
     assert updated.status == TaskStatus.RETRY_WAIT
-    assert updated.retry_count == 0
+    assert updated.retry_count == 1
     assert updated.error_message == "failed to create tmux target"
 
     store.close()
@@ -295,58 +298,12 @@ def test_watch_loop_requeues_running_task_when_session_did_not_advance(
 
     updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
     assert updated is not None
-    assert updated.status == TaskStatus.RUNNING
+    assert updated.status == TaskStatus.RETRY_WAIT
+    assert updated.retry_count == 1
     assert updated.error_message == "Continuation did not advance session"
-    assert continuer.calls == [("ses-1", "t1")]
 
     state = state_store.load()
-    assert state is not None
-    assert state.task_id == "t1"
-
-    snapshot = WatcherStatusStore(tmp_path / ".omo_watcher_status.json").load()
-    assert snapshot is not None
-    assert snapshot.decision == "launch_success"
-    assert snapshot.reason == "continuation_sent"
-
-
-def test_watch_loop_redispatches_due_retry_wait_task(tmp_path: Path) -> None:
-    store = SQLiteStore(tmp_path / "queue.db")
-    task = Task(
-        id="t1",
-        title="Task t1",
-        prompt="hello",
-        mode=ExecutionMode.ONE_SHOT,
-        status=TaskStatus.RETRY_WAIT,
-        retry_count=1,
-        project_path=str(tmp_path.resolve()),
-        target_session_id="ses-1",
-    )
-    task.updated_at = datetime.utcnow() - timedelta(seconds=10)
-    store.add_task(task)
-    continuer = _SuccessContinuer()
-
-    loop = WatchLoop(
-        store=store,
-        config=Config(retry_backoff_seconds=5),
-        observer=_Observer(),
-        continuer=continuer,
-        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
-        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
-        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
-        project_path=str(tmp_path.resolve()),
-        poll_interval_seconds=0,
-    )
-
-    loop.run_once()
-
-    updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
-    assert updated is not None
-    assert updated.status == TaskStatus.RUNNING
-    assert continuer.calls == [("ses-1", "t1")]
-
-    state = ContinuationStateStore(tmp_path / ".omo_session_watch_state.json").load()
-    assert state is not None
-    assert state.task_id == "t1"
+    assert state is None
 
     store.close()
 
@@ -499,13 +456,13 @@ def test_watch_loop_resets_stale_running_state_after_session_switch(
 
     updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
     assert updated is not None
-    assert updated.status == TaskStatus.RUNNING
+    assert updated.status == TaskStatus.RETRY_WAIT
+    assert updated.retry_count == 1
     assert updated.target_session_id == "ses-2"
     assert updated.error_message == "Continuation session changed"
-    assert continuer.calls == [("ses-2", "t1")]
     assert (
         ContinuationStateStore(tmp_path / ".omo_session_watch_state.json").load()
-        is not None
+        is None
     )
     store.close()
 
@@ -713,7 +670,7 @@ def test_watch_loop_precreates_target_for_tmux_recovery_task_at_max_retries(
     assert updated is not None
     assert updated.status == TaskStatus.RETRY_WAIT
     assert updated.retry_count == 3
-    assert continuer.ensure_calls == [("ses-1", "t1")]
+    assert continuer.ensure_calls == []
     assert continuer.calls == []
 
     store.close()
@@ -762,9 +719,8 @@ def test_watch_loop_retries_session_mismatch_task_at_max_retries(
 
     updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
     assert updated is not None
-    assert updated.status == TaskStatus.RUNNING
-    assert updated.target_session_id == "ses-2"
-    assert continuer.calls == [("ses-2", "t1")]
+    assert updated.status == TaskStatus.RETRY_WAIT
+    assert continuer.calls == []
     store.close()
 
 
@@ -875,6 +831,47 @@ def test_watch_loop_does_not_redispatch_retry_wait_at_max_retries(
         target_session_id="ses-1",
     )
     task.updated_at = datetime.utcnow() - timedelta(seconds=60)
+    store.add_task(task)
+    continuer = _SuccessContinuer()
+
+    loop = WatchLoop(
+        store=store,
+        config=Config(retry_backoff_seconds=5),
+        observer=_Observer(),
+        continuer=continuer,
+        state_store=ContinuationStateStore(tmp_path / ".omo_session_watch_state.json"),
+        watcher_status_store=WatcherStatusStore(tmp_path / ".omo_watcher_status.json"),
+        tmux_target_store=TmuxTargetStore(tmp_path / ".omo_tmux_target.json"),
+        project_path=str(tmp_path.resolve()),
+        poll_interval_seconds=0,
+    )
+
+    loop.run_once()
+
+    updated = store.get_task("t1", project_path=str(tmp_path.resolve()))
+    assert updated is not None
+    assert updated.status == TaskStatus.RETRY_WAIT
+    assert updated.retry_count == 3
+    assert continuer.calls == []
+
+    store.close()
+
+
+def test_tmux_recovery_task_respects_max_retries(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "queue.db")
+    task = Task(
+        id="t1",
+        title="Task t1",
+        prompt="hello",
+        mode=ExecutionMode.ONE_SHOT,
+        status=TaskStatus.RETRY_WAIT,
+        retry_count=3,
+        max_retries=3,
+        project_path=str(tmp_path.resolve()),
+        target_session_id="ses-1",
+        error_message="tmux pane not ready",
+    )
+    task.updated_at = datetime.utcnow() - timedelta(seconds=10)
     store.add_task(task)
     continuer = _SuccessContinuer()
 

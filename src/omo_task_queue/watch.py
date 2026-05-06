@@ -216,6 +216,7 @@ class WatchLoop:
         task = self._store.get_task(next_task.id, project_path=self._project_path)
         if self._is_tmux_recovery_error(error_text):
             if task is not None:
+                task.retry_count += 1
                 if task.status is not TaskStatus.RETRY_WAIT:
                     StateMachine.transition(task, TaskStatus.RETRY_WAIT)
                 task.error_message = error_text
@@ -223,9 +224,10 @@ class WatchLoop:
                 self._store.update_task(task)
             self._state_store.clear()
             logger.info(
-                "watch.tmux_recover_wait task_id=%s error=%s",
+                "watch.tmux_recover_wait task_id=%s error=%s retry=%d",
                 next_task.id,
                 error_text,
+                task.retry_count if task is not None else 0,
             )
             return
         if task is not None:
@@ -268,7 +270,8 @@ class WatchLoop:
         )
         for task in retry_tasks:
             if self._is_tmux_recovery_task(task):
-                return task
+                if task.retry_count < task.max_retries:
+                    return task
         for task in retry_tasks:
             if task.retry_count >= task.max_retries:
                 continue
@@ -283,8 +286,9 @@ class WatchLoop:
         due_task = None
         for task in retry_tasks:
             if self._is_tmux_recovery_task(task):
-                due_task = task
-                break
+                if task.retry_count < task.max_retries:
+                    due_task = task
+                    break
         if due_task is None:
             for task in retry_tasks:
                 if task.retry_count >= task.max_retries:
@@ -364,6 +368,7 @@ class WatchLoop:
                 session_id,
             )
             StateMachine.transition(task, TaskStatus.RETRY_WAIT)
+            task.retry_count += 1
             task.target_session_id = session_id
             task.error_message = "Continuation session changed"
             task.updated_at = datetime.utcnow()
@@ -402,14 +407,15 @@ class WatchLoop:
         if (
             snapshot.latest_message_id == state.baseline_message_id
             and snapshot.latest_message_completed_ms is not None
-            and snapshot.latest_message_completed_ms > state.launched_at_ms
-            and snapshot.ready_for_continuation(self._config.idle_threshold)
+            and snapshot.latest_message_completed_ms < state.launched_at_ms
+            and snapshot.stalled(self._config.stalled_threshold)
         ):
             logger.warning(
                 "watch.recover_retry task_id=%s session=%s reason=no_message_advance",
                 task.id,
                 state.session_id,
             )
+            task.retry_count += 1
             StateMachine.transition(task, TaskStatus.RETRY_WAIT)
             task.error_message = "Continuation did not advance session"
             task.updated_at = datetime.utcnow()

@@ -17,6 +17,14 @@
           <label>端口</label>
           <input v-model.number="config.smtp_port" type="number" />
         </div>
+        <div class="field">
+          <label>加密方式</label>
+          <select v-model="encryptionMode" class="field-select">
+            <option value="tls">STARTTLS（587）</option>
+            <option value="ssl">SSL/TLS（465）</option>
+            <option value="none">无加密（25）</option>
+          </select>
+        </div>
       </div>
       <div class="field">
         <label>用户名</label>
@@ -25,18 +33,6 @@
       <div class="field">
         <label>密码</label>
         <input v-model="config.smtp_password" type="password" />
-      </div>
-      <div class="field">
-        <label class="switch-label">
-          <input type="checkbox" v-model="config.smtp_use_tls" />
-          <span>使用 TLS</span>
-        </label>
-      </div>
-      <div class="field">
-        <label class="switch-label">
-          <input type="checkbox" v-model="config.smtp_use_ssl" />
-          <span>使用 SSL 直连（优先于 TLS）</span>
-        </label>
       </div>
       <div class="field-row">
         <div class="field">
@@ -72,7 +68,7 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { api } from '../api/client.js'
 
 const config = reactive({
@@ -85,6 +81,24 @@ const config = reactive({
   smtp_use_ssl: false,
   sender: '',
   recipient: ''
+})
+
+const encryptionMode = ref('tls')
+
+watch(encryptionMode, (mode) => {
+  if (mode === 'ssl') {
+    config.smtp_use_ssl = true
+    config.smtp_use_tls = false
+    config.smtp_port = 465
+  } else if (mode === 'tls') {
+    config.smtp_use_ssl = false
+    config.smtp_use_tls = true
+    config.smtp_port = 587
+  } else {
+    config.smtp_use_ssl = false
+    config.smtp_use_tls = false
+    config.smtp_port = 25
+  }
 })
 
 const testRecipient = ref('')
@@ -108,6 +122,11 @@ async function test() {
   testing.value = true
   testResult.value = null
   try {
+    const saveRes = await api.saveNotifyConfig({ ...config })
+    if (!saveRes.success) {
+      testResult.value = { ok: false, message: '保存配置失败: ' + (saveRes.error || '未知错误') }
+      return
+    }
     const res = await api.testNotification(testRecipient.value || null)
     testResult.value = {
       ok: res.success,
@@ -125,6 +144,13 @@ async function load() {
     const res = await api.getNotifyConfig()
     if (res.success && res.data) {
       Object.assign(config, res.data)
+      if (config.smtp_use_ssl) {
+        encryptionMode.value = 'ssl'
+      } else if (config.smtp_use_tls) {
+        encryptionMode.value = 'tls'
+      } else {
+        encryptionMode.value = 'none'
+      }
     }
   } catch (e) {
     console.error('加载通知配置失败', e)
@@ -182,6 +208,25 @@ load()
   color: var(--canvas-text-muted);
 }
 .field input:focus {
+  outline: none;
+  border-color: var(--accent-orange);
+  background: var(--canvas-card);
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+}
+.field-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--canvas-border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--canvas-text);
+  background: var(--canvas-bg);
+  box-sizing: border-box;
+  font-family: inherit;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+.field-select:focus {
   outline: none;
   border-color: var(--accent-orange);
   background: var(--canvas-card);

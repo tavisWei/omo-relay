@@ -437,13 +437,20 @@ class QueueAPIHandler(BaseHTTPRequestHandler):
         config.save(self.config_path)
 
     def _update_notification_config(self, payload: dict[str, Any]) -> None:
+        previously_enabled = self.notification_config.enabled
         current = asdict(self.notification_config)
         current.update(payload)
         self.notification_config = NotificationConfig(**current)
         type(self).notification_config = self.notification_config
 
+        now_enabled = self.notification_config.enabled
         notifier = getattr(self.panel, "_notifier", None)
-        if notifier is not None and hasattr(notifier, "config"):
+        if previously_enabled != now_enabled:
+            if now_enabled:
+                self.panel._notifier = EmailNotifier(self.notification_config)
+            else:
+                self.panel._notifier = MockNotifier(self.notification_config)
+        elif notifier is not None and hasattr(notifier, "config"):
             notifier.config = self.notification_config
 
         self._persist_notification_config()

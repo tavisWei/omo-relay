@@ -228,6 +228,7 @@ class PanelHandler:
         self._store.update_status(
             req.task_id, TaskStatus.DONE, project_path=self._project_path
         )
+        self._notify_task_done(task)
         self._maybe_start_queue()
         return UIResponse(success=True)
 
@@ -253,12 +254,35 @@ class PanelHandler:
 
     def test_notification(self, req: _NotificationRequest) -> UIResponse:
         if self._notifier is None:
-            return UIResponse(success=False, error="Notifier not configured")
+            return UIResponse(
+                success=False, error="通知服务未初始化，请保存配置后重启服务"
+            )
         try:
+            if hasattr(self._notifier, "test_smtp_connection"):
+                if not self._notifier.test_smtp_connection():
+                    return UIResponse(
+                        success=False,
+                        error="SMTP 连接失败，请检查主机、端口、用户名/密码、加密方式是否正确",
+                    )
             self._notifier.send_test(recipient=req.recipient)
             return UIResponse(success=True)
         except Exception as exc:
-            return UIResponse(success=False, error=str(exc))
+            return UIResponse(success=False, error=f"邮件发送失败: {exc}")
+
+    def _notify_task_done(self, task: Any) -> None:
+        if self._notifier is None:
+            return
+        task.status = TaskStatus.DONE
+        task.completed_at = datetime.utcnow()
+        try:
+            self._notifier.send_success_notification(task)
+        except Exception:
+            pass
+        next_task = self._store.get_next_pending(project_path=self._project_path)
+        try:
+            self._notifier.send_queue_completion_notification(task, next_task)
+        except Exception:
+            pass
 
     def _tmux_attach_command(self) -> Optional[str]:
         target = self._load_tmux_target()

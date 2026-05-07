@@ -159,7 +159,7 @@ class EmailNotifier:
     def _open_server(self, timeout: int):
         try:
             return self._open_server_with_host(self.config.smtp_host, timeout)
-        except socket.gaierror:
+        except OSError:
             resolved = self._resolve_via_http_dns(self.config.smtp_host, timeout)
             if resolved is None:
                 raise

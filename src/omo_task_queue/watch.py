@@ -6,6 +6,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from omo_task_queue.confirmed_session import (
     ConfirmedSessionStore,
@@ -54,11 +55,60 @@ class WatchLoop:
         self._notifier = notifier
         self._poll_interval_seconds = poll_interval_seconds
         self._retry_manager = RetryManager(config)
+        self._config_path = Path(project_path) / "omo_task_queue.json"
+        self._last_notification_hash: Optional[str] = None
 
     def run_forever(self) -> None:
         while True:
+            self._maybe_reload_notifier()
             self.run_once()
             time.sleep(self._poll_interval_seconds)
+
+    def _maybe_reload_notifier(self) -> None:
+        """Reload notification config from disk and rebuild notifier if changed."""
+        try:
+            disk_config = Config.load(self._config_path)
+        except Exception:
+            return
+        notification_settings = disk_config.notification_settings
+        current_hash = str(sorted(notification_settings.items()))
+        if current_hash == self._last_notification_hash:
+            return
+        self._last_notification_hash = current_hash
+
+        enabled = notification_settings.get("enabled", False)
+        current_is_mock = isinstance(self._notifier, MockNotifier)
+        should_be_mock = not enabled
+
+        if current_is_mock != should_be_mock:
+            if enabled:
+                self._notifier = EmailNotifier(
+                    NotificationConfig(
+                        enabled=True,
+                        smtp_host=notification_settings.get("smtp_host", "localhost"),
+                        smtp_port=notification_settings.get("smtp_port", 587),
+                        smtp_user=notification_settings.get("smtp_user", ""),
+                        smtp_password=notification_settings.get("smtp_password", ""),
+                        smtp_use_tls=notification_settings.get("smtp_use_tls", True),
+                        smtp_use_ssl=notification_settings.get("smtp_use_ssl", False),
+                        recipient=notification_settings.get("recipient", ""),
+                        sender=notification_settings.get("sender", ""),
+                    )
+                )
+            else:
+                self._notifier = MockNotifier(NotificationConfig(enabled=False))
+        elif self._notifier is not None and hasattr(self._notifier, "config"):
+            self._notifier.config = NotificationConfig(
+                enabled=enabled,
+                smtp_host=notification_settings.get("smtp_host", "localhost"),
+                smtp_port=notification_settings.get("smtp_port", 587),
+                smtp_user=notification_settings.get("smtp_user", ""),
+                smtp_password=notification_settings.get("smtp_password", ""),
+                smtp_use_tls=notification_settings.get("smtp_use_tls", True),
+                smtp_use_ssl=notification_settings.get("smtp_use_ssl", False),
+                recipient=notification_settings.get("recipient", ""),
+                sender=notification_settings.get("sender", ""),
+            )
 
     def _get_confirmed_session(self) -> str | None:
         return resolve_confirmed_session_id(self._project_path)
@@ -450,6 +500,13 @@ class WatchLoop:
             task.updated_at = datetime.utcnow()
             self._store.update_task(task)
             next_task = self._store.get_next_pending(project_path=self._project_path)
+            if self._notifier is not None:
+                try:
+                    self._notifier.send_success_notification(task)
+                except Exception:
+                    logger.exception(
+                        "Failed to send success notification for task %s", task.id
+                    )
             if self._notifier is not None and hasattr(
                 self._notifier, "send_queue_completion_notification"
             ):

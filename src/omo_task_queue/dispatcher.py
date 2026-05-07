@@ -127,6 +127,7 @@ class Dispatcher:
         client: Optional[Any] = None,
         launch_callback: Optional[Callable[[Task, TaskResult], None]] = None,
         project_path: str = "",
+        notifier: Any = None,
     ) -> None:
         self._store = store
         self._retry_manager = retry_manager or RetryManager()
@@ -134,6 +135,7 @@ class Dispatcher:
         self._currently_running: Optional[str] = None
         self._launch_callback = launch_callback
         self._project_path = project_path
+        self._notifier = notifier
 
     @staticmethod
     def _default_adapters(
@@ -219,7 +221,23 @@ class Dispatcher:
         StateMachine.transition(task, TaskStatus.DONE)
         self._store.update_task(task)
 
+        if self._notifier is not None:
+            try:
+                self._notifier.send_success_notification(task)
+            except Exception:
+                logger.exception(
+                    "Failed to send success notification for task %s", task.id
+                )
+
         next_task = self._store.claim_next(project_path=self._project_path)
+        if self._notifier is not None:
+            try:
+                self._notifier.send_queue_completion_notification(task, next_task)
+            except Exception:
+                logger.exception(
+                    "Failed to send queue completion notification for task %s", task.id
+                )
+
         if next_task is not None:
             logger.info("Auto-advancing to next task %s", next_task.id)
             self.dispatch(next_task)

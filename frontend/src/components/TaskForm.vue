@@ -43,9 +43,15 @@
                 :value="p.project_path"
               >
                 {{ p.project_name || p.project_path }}
-                <span v-if="!p.api_base_url"> (点击启动)</span>
               </option>
             </select>
+            <button
+              v-if="selectedProject && selectedProject.api_base_url && selectedProjectPath !== confirmedProjectPath"
+              class="btn btn-sm btn-primary"
+              @click="$emit('confirmProject', selectedProjectPath)"
+            >
+              确定
+            </button>
             <button
               v-if="selectedProject && !selectedProject.api_base_url"
               class="btn btn-sm btn-primary"
@@ -54,8 +60,9 @@
             >
               {{ starting ? '启动中...' : '启动服务' }}
             </button>
+            <span v-if="selectedProjectPath === confirmedProjectPath" class="selector-hint confirmed">已确认</span>
           </div>
-          <div v-if="sessions.length > 0" class="selector-group">
+          <div v-if="sessions.length > 0 && selectedProjectPath === confirmedProjectPath" class="selector-group">
             <label class="selector-label">会话</label>
             <select
               class="selector-select"
@@ -95,10 +102,11 @@ const props = defineProps({
   sessions: { type: Array, default: () => [] },
   modelValue: { type: String, default: '' },
   starting: { type: Boolean, default: false },
+  confirmedProjectPath: { type: String, default: '' },
   confirmedSessionId: { type: String, default: '' }
 })
 
-const emit = defineEmits(['add', 'update:selectedProjectPath', 'update:modelValue', 'startProject', 'confirmSession'])
+const emit = defineEmits(['add', 'update:selectedProjectPath', 'update:modelValue', 'startProject', 'confirmProject', 'confirmSession'])
 
 const selectedProject = computed(() => {
   return props.projects.find(p => p.project_path === props.selectedProjectPath)

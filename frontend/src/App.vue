@@ -57,7 +57,9 @@
           :sessions="projectSessions"
           v-model="selectedSessionId"
           @startProject="handleStartProject"
+          @confirmProject="handleConfirmProject"
           :starting="startingProject"
+          :confirmedProjectPath="confirmedProjectPath"
           :confirmedSessionId="confirmedSessionId"
           @confirmSession="handleConfirmSession"
         />
@@ -132,6 +134,7 @@ const selectedProjectPath = ref('')
 const projectSessions = ref([])
 const selectedSessionId = ref('')
 const confirmedSessionId = ref('')
+const confirmedProjectPath = ref('')
 const error = ref('')
 const startingProject = ref(false)
 let applyingSessionSelection = false
@@ -273,6 +276,21 @@ async function handleConfirmSession(sessionId) {
   }
 }
 
+async function handleConfirmProject(projectPath) {
+  if (!projectPath) return
+  const project = projects.value.find(p => p.project_path === projectPath)
+  if (!project?.api_base_url) return
+  error.value = ''
+  confirmedProjectPath.value = projectPath
+  selectedSessionId.value = ''
+  confirmedSessionId.value = ''
+  projectSessions.value = []
+  activePage.value = 1
+  completedPage.value = 1
+  setActiveBaseUrl(project.api_base_url)
+  await refresh()
+}
+
 async function handleAdd(task) {
   error.value = ''
   try {
@@ -385,17 +403,15 @@ async function handleBulkDelete(ids) {
 
 watch(selectedProjectPath, (value, previous) => {
   if (!value || value === previous) return
+  confirmedProjectPath.value = ''
+  selectedSessionId.value = ''
+  confirmedSessionId.value = ''
+  projectSessions.value = []
+  activePage.value = 1
+  completedPage.value = 1
   const project = projects.value.find(p => p.project_path === value)
-  if (project?.api_base_url) {
-    setActiveBaseUrl(project.api_base_url)
-    selectedSessionId.value = ''
-    confirmedSessionId.value = ''
-    projectSessions.value = []
-    activePage.value = 1
-    completedPage.value = 1
-    refresh()
-  } else if (project) {
-    error.value = `项目 "${project.project_name}" 尚未启动服务，无法管理任务`
+  if (project && !project.api_base_url) {
+    error.value = `项目 "${project.project_name}" 尚未启动服务，请点击「启动服务」确认`
   }
 })
 
@@ -430,6 +446,7 @@ async function handleStartProject(projectPath) {
     const res = await api.startProject(projectPath)
     if (res.success) {
       await loadProjects()
+      confirmedProjectPath.value = projectPath
       selectedProjectPath.value = projectPath
       setActiveBaseUrl(res.api_base_url)
       selectedSessionId.value = ''
@@ -457,6 +474,7 @@ onMounted(() => {
   loadProjects().then(() => {
     const project = projects.value.find(p => p.project_path === selectedProjectPath.value)
     if (project?.api_base_url) {
+      confirmedProjectPath.value = selectedProjectPath.value
       setActiveBaseUrl(project.api_base_url)
     }
     refresh()
